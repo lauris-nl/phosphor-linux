@@ -17,7 +17,8 @@ export function MainLayout() {
   const wizard = useWizard();
 
   // B1: Derive PM3 connection status from wizard step
-  const connected = wizard.currentStep !== 'Idle' && wizard.currentStep !== 'DetectingDevice';
+  const connected = wizard.context.port !== null
+    && !(wizard.currentStep === 'Error' && wizard.context.errorRecoveryAction === 'Reconnect');
 
   // B8: Derive system status from wizard state
   const status: SystemStatus = wizard.isLoading ? 'busy'

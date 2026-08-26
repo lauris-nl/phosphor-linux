@@ -13,7 +13,7 @@ interface ErrorStepProps {
 
 function getRetryLabel(action: RecoveryAction | null | undefined, source?: string | null): string {
   if (action === 'Retry' && (source === 'write' || source === 'blank')) {
-    return 'RETRY WRITE';
+    return 'BACK TO READER';
   }
   switch (action) {
     case 'Reconnect':

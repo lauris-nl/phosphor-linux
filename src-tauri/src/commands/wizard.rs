@@ -9,12 +9,10 @@ use crate::error::AppError;
 use crate::state::{WizardAction, WizardMachine, WizardState};
 
 #[tauri::command]
-pub fn get_wizard_state(
-    machine: State<'_, Mutex<WizardMachine>>,
-) -> Result<WizardState, AppError> {
-    let machine = machine.lock().map_err(|e| {
-        AppError::CommandFailed(format!("State lock poisoned: {}", e))
-    })?;
+pub fn get_wizard_state(machine: State<'_, Mutex<WizardMachine>>) -> Result<WizardState, AppError> {
+    let machine = machine
+        .lock()
+        .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
     Ok(machine.current.clone())
 }
 
@@ -96,9 +94,37 @@ pub fn wizard_action(
     action: UserAction,
     machine: State<'_, Mutex<WizardMachine>>,
 ) -> Result<WizardState, AppError> {
-    let mut machine = machine.lock().map_err(|e| {
-        AppError::CommandFailed(format!("State lock poisoned: {}", e))
-    })?;
-    machine.transition(action.into_wizard_action())?;
+    let mut machine = machine
+        .lock()
+        .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
+    let action_name = match &action {
+        UserAction::Reset => "Reset",
+        UserAction::Retry => "Retry",
+        UserAction::ProceedToWrite { .. } => "ProceedToWrite",
+        UserAction::StartDetection => "StartDetection",
+        UserAction::StartScan => "StartScan",
+        UserAction::StartWrite => "StartWrite",
+        UserAction::MarkComplete { .. } => "MarkComplete",
+        UserAction::BackToScan => "BackToScan",
+        UserAction::SoftReset => "SoftReset",
+        UserAction::Disconnect => "Disconnect",
+        UserAction::ReDetectBlank => "ReDetectBlank",
+        UserAction::LoadSavedCard { .. } => "LoadSavedCard",
+    };
+    let before = format!("{:?}", std::mem::discriminant(&machine.current));
+    if let Err(error) = machine.transition(action.into_wizard_action()) {
+        log::warn!(
+            "[phosphor:wizard] action={} from={} failed: {}",
+            action_name,
+            before,
+            error
+        );
+        return Err(error);
+    }
+    log::debug!(
+        "[phosphor:wizard] action={} from={} succeeded",
+        action_name,
+        before
+    );
     Ok(machine.current.clone())
 }

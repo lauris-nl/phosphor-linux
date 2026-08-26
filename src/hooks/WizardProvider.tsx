@@ -399,10 +399,12 @@ export function WizardProvider({ children }: { children: ReactNode }) {
         recommendedBlank: card.recommendedBlank as WizCtx['recommendedBlank'] & string,
       });
     } catch (err) {
-      console.error('loadSavedCard: Rust LoadSavedCard failed, resetting', err);
-      reset();
+      // Loading saved metadata is not a transport operation. A rejected state
+      // transition must never discard a known PM3 connection.
+      console.error('loadSavedCard: Rust LoadSavedCard failed', err);
+      throw err;
     }
-  }, [send, reset]);
+  }, [send]);
 
   // Destructure context for granular memo deps — avoids re-renders from
   // write-progress updates reaching components that only need step/device info.
@@ -454,7 +456,8 @@ export function WizardProvider({ children }: { children: ReactNode }) {
       ctx.errorRecoverable, ctx.errorRecoveryAction, ctx.errorSource,
       // Firmware
       ctx.firmwareStatus, ctx.clientVersion, ctx.deviceFirmwareVersion,
-      ctx.hardwareVariant, ctx.firmwarePathExists, ctx.firmwareProgress, ctx.firmwareMessage,
+      ctx.hardwareVariant, ctx.flashSizeKb, ctx.compatibilityState,
+      ctx.automaticUpdateAvailable, ctx.firmwarePathExists, ctx.firmwareProgress, ctx.firmwareMessage,
       // HF processing
       ctx.hfPhase, ctx.hfKeysFound, ctx.hfKeysTotal, ctx.hfElapsed, ctx.hfDumpInfo,
       // Callbacks

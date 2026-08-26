@@ -14,16 +14,84 @@ const T5577_TOTAL_STEPS: u16 = 6;
 /// detect -> wipe -> verify wipe -> clone -> done
 const EM4305_TOTAL_STEPS: u16 = 5;
 
-/// Stub that returns an error directing callers to write_clone_with_data.
-/// Kept registered so the frontend gets a clear message if it calls without params.
-#[tauri::command]
-pub async fn write_clone(
-    _app: AppHandle,
-    _machine: State<'_, Mutex<WizardMachine>>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteFailureKind {
+    DeviceDisconnected,
+    SerialPortBusy,
+    TagNotDetected,
+    IncompatibleTarget,
+    Timeout,
+    CommandFailed,
+}
+
+fn classify_write_failure(error: &AppError, port_present: bool) -> WriteFailureKind {
+    if !port_present {
+        return WriteFailureKind::DeviceDisconnected;
+    }
+
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("resource busy")
+        || message.contains("device or resource busy")
+        || message.contains("port is busy")
+        || message.contains("permission denied")
+    {
+        WriteFailureKind::SerialPortBusy
+    } else if message.contains("not detected")
+        || message.contains("no tag")
+        || message.contains("no t5577")
+        || message.contains("no em4305")
+    {
+        WriteFailureKind::TagNotDetected
+    } else if message.contains("not compatible")
+        || message.contains("unsupported blank")
+        || message.contains("wrong tag")
+    {
+        WriteFailureKind::IncompatibleTarget
+    } else if matches!(error, AppError::Timeout(_)) || message.contains("timed out") {
+        WriteFailureKind::Timeout
+    } else {
+        WriteFailureKind::CommandFailed
+    }
+}
+
+fn report_write_failure(
+    machine: &State<'_, Mutex<WizardMachine>>,
+    port: &str,
+    error: &AppError,
 ) -> Result<WizardState, AppError> {
-    Err(AppError::CommandFailed(
-        "write_clone is deprecated: use write_clone_with_data instead".into(),
-    ))
+    let detail = error.to_string();
+    let kind = classify_write_failure(error, connection::port_is_present(port));
+    let (user_message, recovery_action) = match kind {
+        WriteFailureKind::DeviceDisconnected => (
+            "PM3 USB disconnected. Reconnect the reader before retrying.".to_string(),
+            RecoveryAction::Reconnect,
+        ),
+        WriteFailureKind::SerialPortBusy => (
+            "PM3 serial port is busy. Close other PM3 clients and retry.".to_string(),
+            RecoveryAction::Retry,
+        ),
+        WriteFailureKind::TagNotDetected => (
+            "Target tag not detected. Reposition the compatible blank and retry.".to_string(),
+            RecoveryAction::Retry,
+        ),
+        WriteFailureKind::IncompatibleTarget => (
+            "Target tag is not compatible with this saved card.".to_string(),
+            RecoveryAction::GoBack,
+        ),
+        WriteFailureKind::Timeout => (
+            "PM3 command timed out, but the USB reader is still present. Retry once.".to_string(),
+            RecoveryAction::Retry,
+        ),
+        WriteFailureKind::CommandFailed => (
+            format!(
+                "PM3 command failed: {}",
+                detail.lines().last().unwrap_or("unknown command error")
+            ),
+            RecoveryAction::Retry,
+        ),
+    };
+
+    report_error(machine, &detail, &user_message, true, Some(recovery_action))
 }
 
 /// Write clone with explicit parameters from the frontend.
@@ -38,13 +106,18 @@ pub async fn write_clone_with_data(
     blank_type: Option<BlankType>,
     machine: State<'_, Mutex<WizardMachine>>,
 ) -> Result<WizardState, AppError> {
-    log::debug!("write_clone_with_data: port={}, card_type={:?}, uid={}, blank_type={:?}", port, card_type, uid, blank_type);
+    log::debug!("[phosphor:invoke] write_clone_with_data invoked");
+    log::debug!(
+        "write_clone_with_data: port={}, card_type={:?}, uid={}, blank_type={:?}",
+        port,
+        card_type,
+        uid,
+        blank_type
+    );
 
     // Guard: reject absurdly large decoded maps (prevents DoS via oversized IPC payload)
     if decoded.len() > 50 {
-        return Err(AppError::CommandFailed(
-            "Too many decoded fields".into(),
-        ));
+        return Err(AppError::CommandFailed("Too many decoded fields".into()));
     }
 
     // Validate uid: must be non-empty alphanumeric with optional colons.
@@ -59,15 +132,10 @@ pub async fn write_clone_with_data(
         return Err(AppError::CommandFailed("UID too long".into()));
     }
 
-    // Validate port format
-    if port.is_empty()
-        || port.len() > 50
-        || port.contains(';')
-        || port.contains('\n')
-        || port.contains('\r')
-    {
-        return Err(AppError::CommandFailed("Invalid port".into()));
-    }
+    // Use the same validator as every PM3 subprocess. In particular, do not
+    // reject a valid persistent Linux by-id path merely because it exceeds an
+    // arbitrary short length.
+    connection::validate_port(&port)?;
 
     let blank = blank_type.unwrap_or_else(|| card_type.recommended_blank());
 
@@ -84,9 +152,9 @@ pub async fn write_clone_with_data(
 
     // Transition: BlankDetected -> Writing
     {
-        let mut m = machine.lock().map_err(|e| {
-            AppError::CommandFailed(format!("State lock poisoned: {}", e))
-        })?;
+        let mut m = machine
+            .lock()
+            .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
         m.transition(WizardAction::StartWrite)?;
     }
 
@@ -100,22 +168,7 @@ pub async fn write_clone_with_data(
                 Err(e) => {
                     let err_detail = e.to_string();
                     log::warn!("T5577 flow error: {}", err_detail);
-                    // Show the actual PM3 error to the user for debugging
-                    let user_msg = format!(
-                        "Write failed: {}",
-                        err_detail.lines().last().unwrap_or("unknown error")
-                    );
-                    let _ = report_error(
-                        &machine,
-                        &err_detail,
-                        &user_msg,
-                        true,
-                        Some(RecoveryAction::Retry),
-                    );
-                    let m = machine.lock().map_err(|e| {
-                        AppError::CommandFailed(format!("State lock poisoned: {}", e))
-                    })?;
-                    Ok(m.current.clone())
+                    report_write_failure(&machine, &port, &e)
                 }
             }
         }
@@ -123,30 +176,16 @@ pub async fn write_clone_with_data(
             match write_em4305_flow(&app, &port, &card_type, &uid, &decoded, &machine).await {
                 Ok(state) => Ok(state),
                 Err(e) => {
-                    let err_detail = e.to_string();
-                    let user_msg = format!(
-                        "Write failed: {}",
-                        err_detail.lines().last().unwrap_or("unknown error")
-                    );
-                    let _ = report_error(
-                        &machine,
-                        &err_detail,
-                        &user_msg,
-                        true,
-                        Some(RecoveryAction::Retry),
-                    );
-                    let m = machine.lock().map_err(|e| {
-                        AppError::CommandFailed(format!("State lock poisoned: {}", e))
-                    })?;
-                    Ok(m.current.clone())
+                    log::warn!("EM4305 flow error: {}", e);
+                    report_write_failure(&machine, &port, &e)
                 }
             }
         }
         _ => {
             // Other blank types not yet supported for LF
-            let mut m = machine.lock().map_err(|e| {
-                AppError::CommandFailed(format!("State lock poisoned: {}", e))
-            })?;
+            let mut m = machine
+                .lock()
+                .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
             m.transition(WizardAction::ReportError {
                 message: format!("Unsupported blank type {:?} for LF cloning", blank),
                 user_message: "This blank type is not supported for LF card cloning.".to_string(),
@@ -176,7 +215,11 @@ async fn write_t5577_flow(
     let detect_out =
         connection::run_command(app, port, command_builder::build_t5577_detect()).await?;
     let t5577_status = output_parser::parse_t5577_detect(&detect_out);
-    log::debug!("T5577 detect: detected={}, pw={}", t5577_status.detected, t5577_status.password_set);
+    log::debug!(
+        "T5577 detect: detected={}, pw={}",
+        t5577_status.detected,
+        t5577_status.password_set
+    );
 
     if !t5577_status.detected {
         return report_error(
@@ -231,11 +274,8 @@ async fn write_t5577_flow(
     if password.is_some() {
         update_progress(app, machine, 0.35, Some(2), Some(T5577_TOTAL_STEPS))?;
 
-        let wipe_cmd =
-            command_builder::build_wipe_command(&BlankType::T5577, password.as_deref())
-                .ok_or_else(|| {
-                    AppError::CommandFailed("No wipe command for this blank type".into())
-                })?;
+        let wipe_cmd = command_builder::build_wipe_command(&BlankType::T5577, password.as_deref())
+            .ok_or_else(|| AppError::CommandFailed("No wipe command for this blank type".into()))?;
         connection::run_command(app, port, &wipe_cmd).await?;
 
         // Verify wipe — ensure T5577 is detected and no longer password-protected.
@@ -265,7 +305,12 @@ async fn write_t5577_flow(
     // Step 5: Clone
     update_progress(app, machine, 0.7, Some(4), Some(T5577_TOTAL_STEPS))?;
 
-    log::debug!("Clone: uid={}, type={:?}, decoded={:?}", uid, card_type, decoded);
+    log::debug!(
+        "Clone: uid={}, type={:?}, decoded={:?}",
+        uid,
+        card_type,
+        decoded
+    );
 
     let base_clone_cmd = command_builder::build_clone_command(card_type, uid, decoded);
 
@@ -274,21 +319,29 @@ async fn write_t5577_flow(
     match base_clone_cmd {
         Some(cmd) => {
             let final_cmd = match &password {
-                Some(pw) => command_builder::build_clone_with_password(&cmd, pw)
-                    .map_err(|e| AppError::CommandFailed(format!("Password validation failed: {}", e)))?,
+                Some(pw) => command_builder::build_clone_with_password(&cmd, pw).map_err(|e| {
+                    AppError::CommandFailed(format!("Password validation failed: {}", e))
+                })?,
                 None => cmd,
             };
             log::debug!("sending={}", final_cmd);
             let clone_output = connection::run_command(app, port, &final_cmd).await;
-            log::debug!("clone_result={:?}", clone_output.as_ref().map(|s| s.chars().take(500).collect::<String>()).map_err(|e| e.to_string()));
+            log::debug!(
+                "clone_result={:?}",
+                clone_output
+                    .as_ref()
+                    .map(|s| s.chars().take(500).collect::<String>())
+                    .map_err(|e| e.to_string())
+            );
             let clone_output = clone_output?;
             // Check for failure indicators in PM3 output
-            if clone_output.contains("[!!]")
-                || clone_output.to_lowercase().contains("fail")
-            {
+            if clone_output.contains("[!!]") || clone_output.to_lowercase().contains("fail") {
                 return report_error(
                     machine,
-                    &format!("Clone command may have failed: {}", clone_output.chars().take(200).collect::<String>()),
+                    &format!(
+                        "Clone command may have failed: {}",
+                        clone_output.chars().take(200).collect::<String>()
+                    ),
                     "Write may have failed. Do not remove the card — try again.",
                     true,
                     Some(RecoveryAction::Retry),
@@ -309,16 +362,16 @@ async fn write_t5577_flow(
     // Step 6: Done writing -> Verifying transition
     update_progress(app, machine, 1.0, Some(5), Some(T5577_TOTAL_STEPS))?;
     {
-        let mut m = machine.lock().map_err(|e| {
-            AppError::CommandFailed(format!("State lock poisoned: {}", e))
-        })?;
+        let mut m = machine
+            .lock()
+            .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
         m.transition(WizardAction::WriteFinished)?;
     }
 
     Ok({
-        let m = machine.lock().map_err(|e| {
-            AppError::CommandFailed(format!("State lock poisoned: {}", e))
-        })?;
+        let m = machine
+            .lock()
+            .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
         m.current.clone()
     })
 }
@@ -337,8 +390,7 @@ async fn write_em4305_flow(
     // Mirrors the T5577 detect step to prevent wiping air / wrong chip.
     update_progress(app, machine, 0.1, Some(0), Some(EM4305_TOTAL_STEPS))?;
 
-    let info_out =
-        connection::run_command(app, port, command_builder::build_em4305_info()).await?;
+    let info_out = connection::run_command(app, port, command_builder::build_em4305_info()).await?;
 
     if !output_parser::parse_em4305_info(&info_out) {
         return report_error(
@@ -389,12 +441,13 @@ async fn write_em4305_flow(
             let em_cmd = command_builder::build_clone_for_em4305(&cmd);
             let clone_output = connection::run_command(app, port, &em_cmd).await?;
             // Check for failure indicators in PM3 output
-            if clone_output.contains("[!!]")
-                || clone_output.to_lowercase().contains("fail")
-            {
+            if clone_output.contains("[!!]") || clone_output.to_lowercase().contains("fail") {
                 return report_error(
                     machine,
-                    &format!("EM4305 clone may have failed: {}", clone_output.chars().take(200).collect::<String>()),
+                    &format!(
+                        "EM4305 clone may have failed: {}",
+                        clone_output.chars().take(200).collect::<String>()
+                    ),
                     "Write may have failed. Do not remove the card — try again.",
                     true,
                     Some(RecoveryAction::Retry),
@@ -415,16 +468,16 @@ async fn write_em4305_flow(
     // Step 5: Done -> Verifying
     update_progress(app, machine, 1.0, Some(4), Some(EM4305_TOTAL_STEPS))?;
     {
-        let mut m = machine.lock().map_err(|e| {
-            AppError::CommandFailed(format!("State lock poisoned: {}", e))
-        })?;
+        let mut m = machine
+            .lock()
+            .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
         m.transition(WizardAction::WriteFinished)?;
     }
 
     Ok({
-        let m = machine.lock().map_err(|e| {
-            AppError::CommandFailed(format!("State lock poisoned: {}", e))
-        })?;
+        let m = machine
+            .lock()
+            .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
         m.current.clone()
     })
 }
@@ -448,9 +501,9 @@ pub async fn verify_clone(
     // Without this check, a call from the wrong state would waste a PM3
     // command before failing on the FSM transition.
     {
-        let m = machine.lock().map_err(|e| {
-            AppError::CommandFailed(format!("State lock poisoned: {}", e))
-        })?;
+        let m = machine
+            .lock()
+            .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
         match &m.current {
             WizardState::Verifying => {}
             other => {
@@ -474,9 +527,9 @@ pub async fn verify_clone(
         output_parser::verify_match(&source_uid, &verify_output)
     };
 
-    let mut m = machine.lock().map_err(|e| {
-        AppError::CommandFailed(format!("State lock poisoned: {}", e))
-    })?;
+    let mut m = machine
+        .lock()
+        .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
     m.transition(WizardAction::VerificationResult {
         success,
         mismatched_blocks: mismatched.clone(),
@@ -507,9 +560,9 @@ fn update_progress(
     current_block: Option<u16>,
     total_blocks: Option<u16>,
 ) -> Result<(), AppError> {
-    let mut m = machine.lock().map_err(|e| {
-        AppError::CommandFailed(format!("State lock poisoned: {}", e))
-    })?;
+    let mut m = machine
+        .lock()
+        .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
     m.transition(WizardAction::UpdateWriteProgress {
         progress,
         current_block,
@@ -536,9 +589,9 @@ fn report_error(
     recoverable: bool,
     recovery_action: Option<RecoveryAction>,
 ) -> Result<WizardState, AppError> {
-    let mut m = machine.lock().map_err(|e| {
-        AppError::CommandFailed(format!("State lock poisoned: {}", e))
-    })?;
+    let mut m = machine
+        .lock()
+        .map_err(|e| AppError::CommandFailed(format!("State lock poisoned: {}", e)))?;
     m.transition(WizardAction::ReportError {
         message: message.to_string(),
         user_message: user_message.to_string(),
@@ -546,4 +599,59 @@ fn report_error(
         recovery_action,
     })?;
     Ok(m.current.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_write_failure, WriteFailureKind};
+    use crate::error::AppError;
+
+    #[test]
+    fn normal_command_failure_is_not_a_disconnect() {
+        let error = AppError::CommandFailed("PM3 exited with code 1".to_string());
+        assert_eq!(
+            classify_write_failure(&error, true),
+            WriteFailureKind::CommandFailed
+        );
+    }
+
+    #[test]
+    fn normal_process_exit_after_dash_c_is_not_a_disconnect() {
+        // A completed `-c` child is represented by command success and never
+        // reaches failure classification. If its status is non-zero while the
+        // node remains present, it is still a command failure, not USB loss.
+        let error = AppError::CommandFailed("Exit code 1: write failed".to_string());
+        assert_ne!(
+            classify_write_failure(&error, true),
+            WriteFailureKind::DeviceDisconnected
+        );
+    }
+
+    #[test]
+    fn missing_device_node_is_a_disconnect() {
+        let error = AppError::CommandFailed("UART write failed".to_string());
+        assert_eq!(
+            classify_write_failure(&error, false),
+            WriteFailureKind::DeviceDisconnected
+        );
+    }
+
+    #[test]
+    fn incompatible_target_has_actionable_classification() {
+        let error = AppError::CommandFailed("target tag is not compatible".to_string());
+        assert_eq!(
+            classify_write_failure(&error, true),
+            WriteFailureKind::IncompatibleTarget
+        );
+    }
+
+    #[test]
+    fn busy_port_is_not_a_disconnect() {
+        let error = AppError::CommandFailed("Device or resource busy".to_string());
+        assert_eq!(
+            classify_write_failure(&error, true),
+            WriteFailureKind::SerialPortBusy
+        );
+    }
+
 }

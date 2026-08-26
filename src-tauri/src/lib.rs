@@ -14,6 +14,10 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Honour RUST_LOG for native diagnostics. The dependency was already
+    // present, but without initialization all backend log records were dropped.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default()).try_init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
@@ -22,8 +26,7 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("failed to resolve app data dir");
-            let database =
-                db::Database::open(data_dir).expect("failed to open database");
+            let database = db::Database::open(data_dir).expect("failed to open database");
             app.manage(database);
             app.manage(Mutex::new(WizardMachine::new()));
             app.manage(FlashState::new());
@@ -36,7 +39,6 @@ pub fn run() {
             commands::device::detect_device,
             commands::blank::detect_blank,
             commands::scan::scan_card,
-            commands::write::write_clone,
             commands::write::write_clone_with_data,
             commands::write::verify_clone,
             commands::history::get_history,

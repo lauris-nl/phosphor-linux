@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+launcher="$repo_dir/scripts/phosphor"
+dev_launcher="$repo_dir/scripts/phosphor-dev"
+test_dir="$(mktemp -d)"
+trap 'rm -r -- "$test_dir"' EXIT
+
+bash -n "$launcher" "$dev_launcher"
+
+if env -u PHOSPHOR_MODERN_PM3_BIN -u PHOSPHOR_PM3_PORT \
+    PATH=/usr/bin:/bin "$launcher" >"$test_dir/no-client.out" 2>&1; then
+    echo "launcher unexpectedly succeeded without a Proxmark3 client" >&2
+    exit 1
+fi
+
+if ! grep -q "A current RRG/Iceman proxmark3 client is required" "$test_dir/no-client.out"; then
+    echo "launcher did not provide an actionable missing-client error" >&2
+    exit 1
+fi
+
+printf '#!/usr/bin/env sh\nexit 0\n' >"$test_dir/proxmark3"
+chmod +x "$test_dir/proxmark3"
+
+if PHOSPHOR_MODERN_PM3_BIN="$test_dir/proxmark3" \
+    PHOSPHOR_PM3_PORT="$test_dir/missing-reader" \
+    "$launcher" >"$test_dir/no-reader.out" 2>&1; then
+    echo "launcher unexpectedly succeeded without a PM3 serial device" >&2
+    exit 1
+fi
+
+if ! grep -q "Proxmark3 serial device is not present" "$test_dir/no-reader.out"; then
+    echo "launcher did not provide an actionable missing-reader error" >&2
+    exit 1
+fi
+
+if grep -R -n -E '/home/[^/]+/|vendor/proxmark3(-legacy)?' \
+    "$launcher" "$dev_launcher"; then
+    echo "launcher contains a developer-machine path" >&2
+    exit 1
+fi
+
+echo "portable launcher checks passed"

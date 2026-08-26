@@ -34,22 +34,58 @@ FPGA, flash, antenna, LED, and board wiring can differ.
 
 ## Requirements
 
-- A Linux desktop with WebKitGTK/Tauri v2 build prerequisites
-- Node.js and npm
-- A current Rust toolchain
+- A Linux desktop capable of running WebKitGTK 4.1 applications
+- Node.js 20.19 or newer and npm (build and development only)
+- A current stable Rust toolchain (build and development only)
 - A current [RRG/Iceman Proxmark3](https://github.com/RfidResearchGroup/proxmark3)
   client that matches the firmware on the reader
 - Permission to access the reader's serial device (commonly through the
   distribution's `uucp` or `dialout` group)
 
-Install the platform packages listed in the
-[Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux),
-then confirm that the PM3 client works independently:
+### Ubuntu / Debian build dependencies
+
+The following is the current Tauri v2 WebKitGTK 4.1 build set:
+
+```bash
+sudo apt update
+sudo apt install --no-install-recommends \
+  build-essential curl file libayatana-appindicator3-dev librsvg2-dev \
+  libssl-dev libwebkit2gtk-4.1-dev libxdo-dev wget
+```
+
+### Arch Linux / Manjaro build dependencies
+
+```bash
+sudo pacman -S --needed \
+  base-devel curl file libappindicator-gtk3 librsvg openssl wget \
+  webkit2gtk-4.1 xdotool appmenu-gtk-module
+```
+
+These packages compile Phosphor and its native Tauri/WebKitGTK shell. Node.js,
+npm, and Rust must also be installed for a source build. See the current
+[Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux)
+for other distributions.
+
+An installed `.deb` records its GTK/WebKit runtime dependencies for the package
+manager. An AppImage bundles most userspace libraries but still relies on the
+host kernel, glibc compatibility, graphics/session services, and optionally
+FUSE; `APPIMAGE_EXTRACT_AND_RUN=1` can be used where FUSE mounting is disabled.
+Neither package format includes the Proxmark3 client.
+
+### RRG client and reader access
+
+The RRG/Iceman `proxmark3` executable is a separate runtime dependency. Confirm
+that it matches the reader firmware and works independently:
 
 ```bash
 proxmark3 --version
 proxmark3 -p /dev/serial/by-id/your-proxmark-device -f -c "hw version"
 ```
+
+If serial access is denied, add the user to the distribution's serial-device
+group (`uucp` on Arch/Manjaro or commonly `dialout` on Debian/Ubuntu), then log
+out and back in. Check the actual device group with `ls -l /dev/ttyACM0` rather
+than assuming a group name.
 
 ## Build and run
 
@@ -62,8 +98,9 @@ cargo build --release --manifest-path src-tauri/Cargo.toml
 ./scripts/phosphor
 ```
 
-The launcher prefers a unique Proxmark entry under `/dev/serial/by-id/`, falls back to a
-unique existing ACM/USB serial node, and finds `proxmark3` through `PATH`.
+The launcher prefers a unique Proxmark entry under `/dev/serial/by-id/`, falls
+back to a unique existing ACM/USB serial node, and finds `proxmark3` through
+`PATH`.
 
 Override either path when discovery is ambiguous or the client is installed in
 a non-standard location:
@@ -96,6 +133,31 @@ cargo test --manifest-path src-tauri/Cargo.toml
 npm run build
 git diff --check
 ```
+
+GitHub Actions performs these checks on a fresh Ubuntu 24.04 runner without an
+RFID reader, serial device, firmware image, or PM3 client binary. The launcher
+tests use temporary fixtures for missing-client and missing-reader errors.
+
+## Linux packages
+
+Tauri is configured for AppImage and Debian package output:
+
+```bash
+npm run tauri build -- --bundles appimage
+npm run tauri build -- --bundles deb
+```
+
+Generated packages are placed under `src-tauri/target/release/bundle/` and are
+ignored by Git. AppImages should be built on the oldest supported Linux base;
+Ubuntu 22.04 or Debian 12 are suitable WebKitGTK 4.1 baselines according to the
+Tauri documentation. Building on a newer system can require a newer glibc.
+
+The AppImage bundles Phosphor and its media framework, but deliberately does not
+bundle `proxmark3`. Bundling RRG later would require a reviewed update policy and
+GPL source/distribution plan. Until then, users install a matching current RRG
+client separately or set `PHOSPHOR_MODERN_PM3_BIN`.
+
+No Linux package or firmware image is currently published as a GitHub Release.
 
 `src-tauri/binaries/`, build output, PM3 logs, dumps, and saved-tag data are
 intentionally excluded from Git. This repository does not vendor the RRG source

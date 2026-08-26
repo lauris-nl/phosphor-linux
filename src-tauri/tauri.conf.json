@@ -36,6 +36,11 @@
       "icons/icon.ico"
     ],
     "copyright": "Copyright 2025-2026 nik shuv",
-    "shortDescription": "Native Linux Proxmark3 GUI"
+    "shortDescription": "Native Linux Proxmark3 GUI",
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
   }
 }

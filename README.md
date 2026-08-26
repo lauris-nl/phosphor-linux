@@ -147,6 +147,11 @@ npm run tauri build -- --bundles appimage
 npm run tauri build -- --bundles deb
 ```
 
+Minimal Debian/Ubuntu packaging environments also need `patchelf` and
+`xdg-utils` for the AppImage bundler. Install `libfuse2` to mount the resulting
+AppImage through FUSE, or launch it with `APPIMAGE_EXTRACT_AND_RUN=1` on hosts
+where FUSE mounting is unavailable.
+
 Generated packages are placed under `src-tauri/target/release/bundle/` and are
 ignored by Git. AppImages should be built on the oldest supported Linux base;
 Ubuntu 22.04 or Debian 12 are suitable WebKitGTK 4.1 baselines according to the

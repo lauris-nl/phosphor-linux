@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -n "${PHOSPHOR_MODERN_PM3_BIN:-}" ]]; then
+    pm3_binary="$PHOSPHOR_MODERN_PM3_BIN"
+else
+    pm3_binary="$(command -v proxmark3 || true)"
+fi
+
+if [[ -z "$pm3_binary" || ! -x "$pm3_binary" ]]; then
+    echo "Install a current RRG/Iceman proxmark3 client or set PHOSPHOR_MODERN_PM3_BIN." >&2
+    exit 1
+fi
+
+if [[ -z "${PHOSPHOR_PM3_PORT:-}" ]]; then
+    echo "Set PHOSPHOR_PM3_PORT to the reader's /dev/serial/by-id path for development." >&2
+    exit 1
+fi
+
+cd "$repo_dir"
+exec env \
+    PHOSPHOR_PM3_PORT="$PHOSPHOR_PM3_PORT" \
+    PHOSPHOR_MODERN_PM3_BIN="$pm3_binary" \
+    PATH="$(dirname -- "$pm3_binary"):$PATH" \
+    npm --silent run tauri dev -- "$@"

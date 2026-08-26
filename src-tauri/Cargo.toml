@@ -10,6 +10,12 @@ edition = "2021"
 name = "phosphor_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Tauri uses this feature to embed `frontendDist` for production builds. The
+# development CLI disables default features so it can continue using `devUrl`.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2.5.5", features = [] }
 
@@ -26,4 +32,3 @@ log = "0.4.29"
 env_logger = "0.11.8"
 thiserror = "1.0.69"
 chrono = { version = "0.4.43", features = ["serde"] }
-

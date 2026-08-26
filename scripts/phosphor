@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+app_binary="$repo_dir/src-tauri/target/release/phosphor"
+
+if [[ -n "${PHOSPHOR_MODERN_PM3_BIN:-}" ]]; then
+    pm3_binary="$PHOSPHOR_MODERN_PM3_BIN"
+else
+    pm3_binary="$(command -v proxmark3 || true)"
+fi
+
+if [[ -z "$pm3_binary" || ! -x "$pm3_binary" ]]; then
+    echo "A current RRG/Iceman proxmark3 client is required." >&2
+    echo "Install it in PATH or set PHOSPHOR_MODERN_PM3_BIN=/path/to/proxmark3." >&2
+    exit 1
+fi
+
+if [[ -n "${PHOSPHOR_PM3_PORT:-}" ]]; then
+    pm3_port="$PHOSPHOR_PM3_PORT"
+else
+    shopt -s nullglob nocaseglob
+    by_id_ports=(/dev/serial/by-id/*proxmark*)
+    shopt -u nocaseglob
+
+    if (( ${#by_id_ports[@]} == 1 )); then
+        pm3_port="${by_id_ports[0]}"
+    elif (( ${#by_id_ports[@]} > 1 )); then
+        echo "Multiple Proxmark3 serial devices found; set PHOSPHOR_PM3_PORT explicitly:" >&2
+        printf '  %s\n' "${by_id_ports[@]}" >&2
+        exit 1
+    else
+        serial_ports=(/dev/ttyACM* /dev/ttyUSB*)
+        if (( ${#serial_ports[@]} == 1 )); then
+            pm3_port="${serial_ports[0]}"
+        else
+            echo "No unique Proxmark3 serial device found; set PHOSPHOR_PM3_PORT explicitly." >&2
+            exit 1
+        fi
+    fi
+fi
+
+if [[ ! -e "$pm3_port" ]]; then
+    echo "Proxmark3 serial device is not present: $pm3_port" >&2
+    exit 1
+fi
+
+if [[ ! -x "$app_binary" ]]; then
+    echo "Phosphor release binary is not built: $app_binary" >&2
+    echo "Run: npm run build && cargo build --release --manifest-path src-tauri/Cargo.toml" >&2
+    exit 1
+fi
+
+exec env \
+    PHOSPHOR_PM3_PORT="$pm3_port" \
+    PHOSPHOR_MODERN_PM3_BIN="$pm3_binary" \
+    PATH="$(dirname -- "$pm3_binary"):$PATH" \
+    "$app_binary" "$@"

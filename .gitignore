@@ -11,6 +11,19 @@ node_modules
 dist
 dist-ssr
 *.local
+src-tauri/target/
+.local/
+.npm/
+.cache/
+wineprefix/
+
+# Local RFID data and Proxmark3 session output
+dumps/
+saved-tags/
+*.dump
+*.eml
+*.pm3
+proxmark3*.log
 
 # Editor directories and files
 .vscode/*
@@ -23,8 +36,9 @@ dist-ssr
 *.sln
 *.sw?
 
-# Sidecar binaries + DLLs (GPL — download from Iceman fork releases)
-src-tauri/binaries/*.exe
+# Sidecar binaries + DLLs are local build inputs, never repository content.
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
 src-tauri/pm3-libs/
 
 # Firmware .elf files (download from proxmarkbuilds.org)

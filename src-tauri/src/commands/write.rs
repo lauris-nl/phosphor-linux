@@ -654,4 +654,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn production_frontend_uses_only_the_data_aware_lf_clone_command() {
+        let api = include_str!("../../../src/lib/api.ts");
+        let machine = include_str!("../../../src/machines/wizardMachine.ts");
+        let registration = include_str!("../lib.rs");
+
+        assert!(api.contains("LF_CLONE_COMMAND = 'write_clone_with_data'"));
+        assert!(api.contains("invoke<WizardState>(LF_CLONE_COMMAND"));
+        assert!(machine.contains("return api.writeCloneWithData("));
+        assert!(!api.contains("invoke<WizardState>('write_clone'"));
+        assert!(!api.contains("invoke<WizardState>(\"write_clone\""));
+        assert!(!registration.contains("commands::write::write_clone,"));
+    }
+
+    #[test]
+    fn saved_card_invoke_rejection_preserves_reader_state() {
+        let provider = include_str!("../../../src/hooks/WizardProvider.tsx");
+        let saved_view = include_str!("../../../src/components/saved/SavedView.tsx");
+        let error_view = include_str!("../../../src/components/wizard/WizardContainer.tsx");
+
+        assert!(provider.contains("loadSavedCard: Rust LoadSavedCard failed', err"));
+        assert!(provider.contains("throw err;"));
+        assert!(saved_view.contains("disabled={!wizard.context.port || expandedIsLoaded}"));
+        assert!(saved_view.contains("CONNECT READER FIRST"));
+        assert!(saved_view.contains("USE SAVED TAG"));
+        assert!(saved_view.contains("LOADED ✓"));
+        assert!(saved_view.contains("WRITE changes the physical target tag"));
+        assert!(error_view.contains(": wizard.softReset}"));
+    }
+
 }

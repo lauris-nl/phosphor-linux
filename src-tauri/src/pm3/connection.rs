@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -66,9 +67,71 @@ fn pm3_scope_names() -> Vec<&'static str> {
 /// Accepts COM1-COM256+ (Windows), /dev/ttyACM0-99, /dev/ttyUSB0-99 (Linux),
 /// and /dev/tty.usbmodem* (macOS).
 static PORT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(COM[1-9]\d*|/dev/tty(ACM|USB)\d{1,2}|/dev/tty\.usbmodem\w+)$")
+    Regex::new(
+        r"^(COM[1-9]\d*|/dev/tty(ACM|USB)\d{1,2}|/dev/tty\.usbmodem\w+|/dev/serial/by-id/[A-Za-z0-9._:+-]+)$",
+    )
         .expect("bad port regex")
 });
+
+/// Validate a serial-port argument consistently for every backend command.
+/// Persistent Linux `/dev/serial/by-id/...` names are intentionally accepted;
+/// callers must not impose shorter arbitrary length limits on them.
+pub fn validate_port(port: &str) -> Result<(), AppError> {
+    if PORT_RE.is_match(port) {
+        Ok(())
+    } else {
+        Err(AppError::CommandFailed(format!("Invalid port: {}", port)))
+    }
+}
+
+/// Whether the OS device node is currently present. This is used only to
+/// distinguish an actual Unix device disappearance from a PM3 command error.
+/// COM ports cannot be checked with filesystem metadata, so they remain
+/// present until a command produces a more specific transport diagnostic.
+pub fn port_is_present(port: &str) -> bool {
+    !port.starts_with("/dev/") || Path::new(port).exists()
+}
+
+/// Legacy compatibility mode for readers that still run pre-PM3a firmware.
+/// Those clients take the serial port as argv[1] instead of the modern
+/// `-p PORT` pair. Native launchers use the modern form unless explicitly
+/// configured otherwise.
+fn use_legacy_cli() -> bool {
+    matches!(
+        std::env::var("PHOSPHOR_PM3_LEGACY").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+fn pm3_args(port: &str, cmd: &str) -> Vec<String> {
+    if use_legacy_cli() {
+        vec![port.into(), "-f".into(), "-c".into(), cmd.into()]
+    } else {
+        vec![
+            "-p".into(),
+            port.into(),
+            "-f".into(),
+            "-c".into(),
+            cmd.into(),
+        ]
+    }
+}
+
+/// Preserve both process streams in non-zero-exit diagnostics. Current RRG
+/// prints command results to stdout but can also write incidental diagnostics
+/// to stderr; selecting stderr alone loses useful results such as the explicit
+/// "no tag found" response.
+fn process_error_detail(stdout: &str, stderr: &str) -> String {
+    let stdout = strip_ansi(stdout).trim().to_string();
+    let stderr = strip_ansi(stderr).trim().to_string();
+
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (false, false) => format!("{}\n{}", stdout, stderr),
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (true, true) => "no process output".to_string(),
+    }
+}
 
 /// Internal PM3 execution that does NOT emit to the frontend.
 /// Handles: port validation, command sanitization, sidecar fallback, PATH lookup,
@@ -76,12 +139,7 @@ static PORT_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Returns the cleaned output string on success.
 async fn execute_pm3(app: &AppHandle, port: &str, cmd: &str) -> Result<String, AppError> {
     // Validate port format to prevent command injection via subprocess args
-    if !PORT_RE.is_match(port) {
-        return Err(AppError::CommandFailed(format!(
-            "Invalid port: {}",
-            port
-        )));
-    }
+    validate_port(port)?;
 
     // Reject command strings containing PM3 command separators or newlines.
     // The PM3 CLI's `-c` flag treats `;` as a delimiter, so a crafted value
@@ -102,7 +160,13 @@ async fn execute_pm3(app: &AppHandle, port: &str, cmd: &str) -> Result<String, A
     //    In dev mode the sidecar won't exist, so this silently falls through.
     match try_sidecar_silent(app, port, cmd).await {
         Ok(output) => return Ok(output),
-        Err(_) => { /* sidecar not available -- fall through to PATH/scope lookup */ }
+        Err(e)
+            if e.to_string().contains("Sidecar not available")
+                || e.to_string().contains("Failed to run sidecar") =>
+        { /* sidecar could not be spawned -- fall through to configured commands */ }
+        // The sidecar did run. Preserve its timeout, exit status and diagnostic
+        // instead of replacing a protocol error with a bogus PATH error.
+        Err(e) => return Err(e),
     }
 
     // 2) Fall back to PATH-based lookup, then common install locations.
@@ -111,11 +175,8 @@ async fn execute_pm3(app: &AppHandle, port: &str, cmd: &str) -> Result<String, A
     let mut first_spawn_error: Option<AppError> = None;
 
     for scope_name in &scope_names {
-        let output_future = app
-            .shell()
-            .command(scope_name)
-            .args(["-p", port, "-f", "-c", cmd])
-            .output();
+        let args = pm3_args(port, cmd);
+        let output_future = app.shell().command(scope_name).args(&args).output();
 
         // Note: When the timeout fires and the future is dropped, Tauri's shell plugin
         // handles cleanup of the child process. The `tokio::time::timeout` wrapper
@@ -147,22 +208,21 @@ async fn execute_pm3(app: &AppHandle, port: &str, cmd: &str) -> Result<String, A
         let code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        log::debug!(
+            "PM3 subprocess exited: code={}, stdout_bytes={}, stderr_bytes={}",
+            code,
+            output.stdout.len(),
+            output.stderr.len()
+        );
 
         return match code {
             0 => {
                 let cleaned = strip_ansi(&stdout);
                 Ok(cleaned)
             }
-            -5 | 251 => Err(AppError::Timeout(format!(
-                "PM3 timed out running: {}",
-                cmd
-            ))),
+            -5 | 251 => Err(AppError::Timeout(format!("PM3 timed out running: {}", cmd))),
             _ => {
-                let detail = if stderr.is_empty() {
-                    strip_ansi(&stdout)
-                } else {
-                    strip_ansi(&stderr)
-                };
+                let detail = process_error_detail(&stdout, &stderr);
                 Err(AppError::CommandFailed(format!(
                     "Exit code {}: {}",
                     code, detail
@@ -258,9 +318,7 @@ where
     F: FnMut(&str),
 {
     // Validate port
-    if !PORT_RE.is_match(port) {
-        return Err(AppError::CommandFailed(format!("Invalid port: {}", port)));
-    }
+    validate_port(port)?;
 
     // Reject command separators
     if cmd.contains(';') || cmd.contains('\n') || cmd.contains('\r') {
@@ -276,9 +334,10 @@ where
 
     // Store child for cancellation
     {
-        let mut lock = hf_state.child.lock().map_err(|e| {
-            AppError::CommandFailed(format!("HF state lock poisoned: {}", e))
-        })?;
+        let mut lock = hf_state
+            .child
+            .lock()
+            .map_err(|e| AppError::CommandFailed(format!("HF state lock poisoned: {}", e)))?;
         *lock = Some(child);
     }
 
@@ -306,7 +365,7 @@ fn spawn_pm3(
     port: &str,
     cmd: &str,
 ) -> Result<(tauri::async_runtime::Receiver<CommandEvent>, CommandChild), AppError> {
-    let args = ["-p", port, "-f", "-c", cmd];
+    let args = pm3_args(port, cmd);
 
     // Try sidecar first
     if let Ok(sidecar_cmd) = app.shell().sidecar("binaries/proxmark3") {
@@ -389,10 +448,7 @@ where
                 }
                 CommandEvent::Error(msg) => {
                     emit_output(app, &msg, true);
-                    return Err(AppError::CommandFailed(format!(
-                        "Process error: {}",
-                        msg
-                    )));
+                    return Err(AppError::CommandFailed(format!("Process error: {}", msg)));
                 }
                 CommandEvent::Terminated(payload) => {
                     exit_code = payload.code;
@@ -443,7 +499,11 @@ pub async fn detect_device(app: &AppHandle) -> Result<(String, String, String), 
         match execute_pm3(app, port, "hw version").await {
             Ok(output) => {
                 if let Some((model, firmware)) = parse_hw_version(&output) {
-                    emit_output(app, &format!("[+] Target acquired: {} on {}", model, port), false);
+                    emit_output(
+                        app,
+                        &format!("[+] Target acquired: {} on {}", model, port),
+                        false,
+                    );
                     emit_output(app, &format!("[+] Firmware: {}", firmware), false);
                     return Ok((port.clone(), model, firmware));
                 }
@@ -457,7 +517,14 @@ pub async fn detect_device(app: &AppHandle) -> Result<(String, String, String), 
                 // handle the mismatch and offer to flash.
                 let err_msg = e.to_string();
                 if err_msg.to_lowercase().contains("capabilities") {
-                    emit_output(app, &format!("[+] Target acquired: Proxmark3 on {} (firmware mismatch)", port), false);
+                    emit_output(
+                        app,
+                        &format!(
+                            "[+] Target acquired: Proxmark3 on {} (firmware mismatch)",
+                            port
+                        ),
+                        false,
+                    );
                     return Ok((
                         port.clone(),
                         "Proxmark3".to_string(),
@@ -469,7 +536,11 @@ pub async fn detect_device(app: &AppHandle) -> Result<(String, String, String), 
                 // from other errors. If spawn itself failed (binary not found), that
                 // affects ALL ports, so propagate immediately.
                 if err_msg.contains("Failed to spawn proxmark3") {
-                    emit_output(app, "[!!] Proxmark3 binary not found. Check installation.", true);
+                    emit_output(
+                        app,
+                        "[!!] Proxmark3 binary not found. Check installation.",
+                        true,
+                    );
                     return Err(e);
                 }
 
@@ -479,14 +550,28 @@ pub async fn detect_device(app: &AppHandle) -> Result<(String, String, String), 
     }
 
     emit_output(app, "[!!] No Proxmark3 found.", true);
-    emit_output(app, "[=] Try a different USB cable (some are charge-only)", false);
+    emit_output(
+        app,
+        "[=] Try a different USB cable (some are charge-only)",
+        false,
+    );
     emit_output(app, "[=] Check Device Manager for a COM port", false);
-    emit_output(app, "[=] PM3 Easy: may need CH340 driver (wch-ic.com)", false);
+    emit_output(
+        app,
+        "[=] PM3 Easy: may need CH340 driver (wch-ic.com)",
+        false,
+    );
     Err(AppError::DeviceNotFound)
 }
 
 fn build_port_candidates() -> Vec<String> {
     let mut ports = Vec::new();
+
+    if let Ok(configured) = std::env::var("PHOSPHOR_PM3_PORT") {
+        if PORT_RE.is_match(&configured) {
+            return vec![configured];
+        }
+    }
 
     if cfg!(target_os = "windows") {
         // Windows COM ports -- extend to 40 to cover USB hub reassignment
@@ -495,22 +580,33 @@ fn build_port_candidates() -> Vec<String> {
         }
     } else if cfg!(target_os = "macos") {
         // macOS: /dev/tty.usbmodem* -- cover common PM3 suffixes
-        for suffix in &[
-            "iceman1",
-            "14101",
-            "14201",
-            "14301",
-            "1",
-            "2",
-            "3",
-        ] {
+        for suffix in &["iceman1", "14101", "14201", "14301", "1", "2", "3"] {
             ports.push(format!("/dev/tty.usbmodem{}", suffix));
         }
     } else {
-        // Linux: /dev/ttyACM* and /dev/ttyUSB*
+        // Linux: prefer persistent udev names and probe only entries whose
+        // names identify a Proxmark, rather than opening unrelated devices.
+        if let Ok(entries) = std::fs::read_dir("/dev/serial/by-id") {
+            for entry in entries.flatten() {
+                let value = entry.path().to_string_lossy().to_string();
+                if value.to_ascii_lowercase().contains("proxmark") && PORT_RE.is_match(&value) {
+                    ports.push(value);
+                }
+            }
+        }
+
+        if !ports.is_empty() {
+            ports.sort();
+            return ports;
+        }
+
+        // Last resort: probe only serial nodes that actually exist.
         for i in 0..=5 {
-            ports.push(format!("/dev/ttyACM{}", i));
-            ports.push(format!("/dev/ttyUSB{}", i));
+            for value in [format!("/dev/ttyACM{}", i), format!("/dev/ttyUSB{}", i)] {
+                if Path::new(&value).exists() {
+                    ports.push(value);
+                }
+            }
         }
     }
 
@@ -531,9 +627,8 @@ async fn try_sidecar_silent(app: &AppHandle, port: &str, cmd: &str) -> Result<St
         .sidecar("binaries/proxmark3")
         .map_err(|e| AppError::CommandFailed(format!("Sidecar not available: {}", e)))?;
 
-    let output_future = sidecar
-        .args(["-p", port, "-f", "-c", cmd])
-        .output();
+    let args = pm3_args(port, cmd);
+    let output_future = sidecar.args(&args).output();
 
     let output = match timeout(PM3_COMMAND_TIMEOUT, output_future).await {
         Err(_) => {
@@ -555,27 +650,60 @@ async fn try_sidecar_silent(app: &AppHandle, port: &str, cmd: &str) -> Result<St
     let code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    log::debug!(
+        "PM3 sidecar exited: code={}, stdout_bytes={}, stderr_bytes={}",
+        code,
+        output.stdout.len(),
+        output.stderr.len()
+    );
 
     match code {
         0 => {
             let cleaned = strip_ansi(&stdout);
             Ok(cleaned)
         }
-        -5 | 251 => Err(AppError::Timeout(format!(
-            "PM3 timed out running: {}",
-            cmd
-        ))),
+        -5 | 251 => Err(AppError::Timeout(format!("PM3 timed out running: {}", cmd))),
         _ => {
-            let detail = if stderr.is_empty() {
-                strip_ansi(&stdout)
-            } else {
-                strip_ansi(&stderr)
-            };
+            let detail = process_error_detail(&stdout, &stderr);
             Err(AppError::CommandFailed(format!(
                 "Exit code {}: {}",
                 code, detail
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{process_error_detail, validate_port};
+
+    #[test]
+    fn stable_linux_by_id_port_is_valid() {
+        assert!(validate_port("/dev/serial/by-id/usb-Proxmark3_Test_Reader-if00").is_ok());
+    }
+
+    #[test]
+    fn invalid_port_is_rejected_without_length_heuristics() {
+        assert!(validate_port("/tmp/not-a-serial-device").is_err());
+        assert!(validate_port("/dev/ttyACM0;evil").is_err());
+    }
+
+    #[test]
+    fn process_error_preserves_stdout_and_stderr() {
+        let detail = process_error_detail(
+            "\x1b[31mNo known/supported 13.56 MHz tags found\x1b[0m\n",
+            "diagnostic\n",
+        );
+        assert!(detail.contains("No known/supported 13.56 MHz tags found"));
+        assert!(detail.contains("diagnostic"));
+        assert!(!detail.contains("\x1b"));
+    }
+
+    #[test]
+    fn process_error_handles_empty_streams() {
+        assert_eq!(process_error_detail("", ""), "no process output");
+        assert_eq!(process_error_detail("result\n", ""), "result");
+        assert_eq!(process_error_detail("", "failure\n"), "failure");
     }
 }
 
@@ -608,9 +736,9 @@ fn extract_short_version(version_str: &str) -> String {
     // Find 'v' followed by a digit
     let v_pos = version_str.char_indices().find(|&(i, c)| {
         c == 'v'
-            && version_str
-                .get(i + 1..i + 2)
-                .map_or(false, |s| s.as_bytes().first().map_or(false, |b| b.is_ascii_digit()))
+            && version_str.get(i + 1..i + 2).map_or(false, |s| {
+                s.as_bytes().first().map_or(false, |b| b.is_ascii_digit())
+            })
     });
 
     if let Some((pos, _)) = v_pos {

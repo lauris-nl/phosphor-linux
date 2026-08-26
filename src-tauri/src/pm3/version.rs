@@ -14,6 +14,8 @@ pub struct HwVersionInfo {
     pub os_version: String,
     /// "rdv4", "rdv4-bt", "generic", or "generic-256"
     pub hardware_variant: String,
+    /// Embedded MCU flash capacity when it can be established from `hw version`.
+    pub flash_size_kb: Option<u32>,
     pub versions_match: bool,
 }
 
@@ -22,9 +24,8 @@ pub struct HwVersionInfo {
 // ---------------------------------------------------------------------------
 
 /// Matches the client version line: `client: Iceman/master/v4.20728-234-g1a2b3c4d5-dirty`
-static CLIENT_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)client\s*:\s*(.+)").expect("bad client version regex")
-});
+static CLIENT_VERSION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)client\s*:\s*(.+)").expect("bad client version regex"));
 
 /// Fallback: captures the first non-empty line after `[ Client ]` section header.
 /// Real PM3 v4.20728+ outputs version directly without `client:` prefix.
@@ -36,22 +37,27 @@ static CLIENT_SECTION_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// - Old: `os: Iceman/master/v4.20725-100-g9876543ab`
 /// - Real: `OS......... Iceman/master/v4.20728-358-ga2ba91043-suspect`
 static OS_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?im)^\s*os[\s.:]+(.+)").expect("bad os version regex")
+    Regex::new(r"(?im)^\s*(?:#db#\s*)?os[\s.:]+(.+)").expect("bad os version regex")
 });
 
 /// Extracts commit hash from version string: `v4.20728-234-g1a2b3c4d5-dirty` → `1a2b3c4d5`
-static COMMIT_HASH_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"-g([0-9a-fA-F]{7,})").expect("bad commit hash regex")
-});
+static COMMIT_HASH_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-g([0-9a-fA-F]{7,})").expect("bad commit hash regex"));
 
 /// Extracts base version: `v4.20728` from `Iceman/master/v4.20728-234-g...`
-static BASE_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"v(\d+\.\d+)").expect("bad base version regex")
-});
+static BASE_VERSION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"v(\d+\.\d+)").expect("bad base version regex"));
 
 /// Detects AT91SAM7S256 (256K flash variant)
-static UC_256K_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)AT91SAM7S256").expect("bad uc 256k regex")
+static UC_256K_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)AT91SAM7S256").expect("bad uc 256k regex"));
+
+static UC_512K_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)AT91SAM7S512").expect("bad uc 512k regex"));
+
+static FLASH_SIZE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:program memory|embedded flash|flash(?: memory)?)[^\n]*?\b(256|512)\s*k(?:b|\s+bytes)?")
+        .expect("bad flash size regex")
 });
 
 // ---------------------------------------------------------------------------
@@ -76,6 +82,7 @@ pub fn parse_detailed_hw_version(output: &str) -> HwVersionInfo {
         .map(|c| c[1].trim().to_string())
         .unwrap_or_default();
     let hardware_variant = detect_hardware_variant(&clean);
+    let flash_size_kb = detect_flash_size_kb(&clean);
     let versions_match = compare_versions(&client_version, &os_version);
 
     HwVersionInfo {
@@ -83,7 +90,24 @@ pub fn parse_detailed_hw_version(output: &str) -> HwVersionInfo {
         client_version,
         os_version,
         hardware_variant,
+        flash_size_kb,
         versions_match,
+    }
+}
+
+/// Determine internal flash capacity from the explicit memory line first and
+/// the SAM7 part number second. This is intentionally independent of the board
+/// variant: an AT91SAM7S512 does not by itself prove RDV4 or PM3 Easy hardware.
+pub fn detect_flash_size_kb(output: &str) -> Option<u32> {
+    if let Some(caps) = FLASH_SIZE_RE.captures(output) {
+        return caps[1].parse().ok();
+    }
+    if UC_512K_RE.is_match(output) {
+        Some(512)
+    } else if UC_256K_RE.is_match(output) {
+        Some(256)
+    } else {
+        None
     }
 }
 
@@ -132,18 +156,18 @@ pub fn detect_hardware_variant(output: &str) -> String {
         return "generic-256".to_string();
     }
 
-    let has_ext_flash = output
-        .lines()
-        .any(|l| l.to_lowercase().contains("external flash") && l.to_lowercase().contains("present"));
+    let has_ext_flash = output.lines().any(|l| {
+        l.to_lowercase().contains("external flash") && l.to_lowercase().contains("present")
+    });
     let has_smartcard = output
         .lines()
         .any(|l| l.to_lowercase().contains("smartcard") && l.to_lowercase().contains("present"));
 
     if has_ext_flash && has_smartcard {
         // RDV4 with BlueShark BT addon has FPC USART support
-        let has_bt = output
-            .lines()
-            .any(|l| l.to_lowercase().contains("fpc usart") && l.to_lowercase().contains("present"));
+        let has_bt = output.lines().any(|l| {
+            l.to_lowercase().contains("fpc usart") && l.to_lowercase().contains("present")
+        });
         if has_bt {
             "rdv4-bt".to_string()
         } else {
@@ -170,10 +194,12 @@ fn extract_base_version(version: &str) -> Option<String> {
 
 fn parse_model(output: &str) -> String {
     for line in output.lines() {
-        let trimmed = line.trim();
-        if (trimmed.contains("Prox") && trimmed.contains("RFID"))
-            || trimmed.contains("Proxmark")
-        {
+        let trimmed = line
+            .trim()
+            .strip_prefix("#db#")
+            .unwrap_or(line.trim())
+            .trim();
+        if (trimmed.contains("Prox") && trimmed.contains("RFID")) || trimmed.contains("Proxmark") {
             let cleaned = trimmed.trim_matches(|c: char| !c.is_alphanumeric() && c != ' ');
             if !cleaned.is_empty() {
                 return cleaned.to_string();
@@ -236,6 +262,15 @@ mod tests {
   --= uC: AT91SAM7S256 Rev C
 "#;
 
+    const SAMPLE_WILLOK_2016: &str = r#"
+#db# Prox/RFID mark3 RFID instrument
+#db# bootrom: /-suspect 2016-11-09 00:59:56
+#db# os: /-suspect 2016-11-14 03:06:26
+#db# HF FPGA image built on 2015/03/09 at 08:41:42
+Prox/RFID mark3 RFID instrument
+uC: AT91SAM7S512 Rev A
+"#;
+
     #[test]
     fn test_parse_rdv4_matching() {
         let info = parse_detailed_hw_version(SAMPLE_HW_VERSION);
@@ -257,6 +292,15 @@ mod tests {
         let info = parse_detailed_hw_version(SAMPLE_GENERIC_256);
         assert_eq!(info.hardware_variant, "generic-256");
         assert!(info.versions_match); // same base version, no commit hash
+    }
+
+    #[test]
+    fn test_parse_willok_2016() {
+        let info = parse_detailed_hw_version(SAMPLE_WILLOK_2016);
+        assert_eq!(info.model, "Prox/RFID mark3 RFID instrument");
+        assert_eq!(info.os_version, "/-suspect 2016-11-14 03:06:26");
+        assert_eq!(info.hardware_variant, "generic");
+        assert!(!info.versions_match);
     }
 
     #[test]
@@ -327,6 +371,20 @@ mod tests {
         assert_eq!(detect_hardware_variant(output), "generic-256");
     }
 
+    #[test]
+    fn test_detect_flash_size_from_willok_mcu() {
+        assert_eq!(
+            detect_flash_size_kb("#db# uC: AT91SAM7S512 Rev A"),
+            Some(512)
+        );
+    }
+
+    #[test]
+    fn test_detect_flash_size_from_explicit_memory() {
+        let output = "Nonvolatile Program Memory Size: 512K bytes";
+        assert_eq!(detect_flash_size_kb(output), Some(512));
+    }
+
     /// Real PM3 v4.20728 output — no `client:` prefix, `OS.........` with dots
     const SAMPLE_REAL_PM3: &str = r#"
 [ Proxmark3 ]
@@ -345,8 +403,16 @@ OS......... Iceman/master/v4.20728-358-ga2ba91043-suspect 2026-02-09 00:22:17 c0
     #[test]
     fn test_parse_real_pm3_output() {
         let info = parse_detailed_hw_version(SAMPLE_REAL_PM3);
-        assert!(info.client_version.contains("v4.20728"), "client: {}", info.client_version);
-        assert!(info.os_version.contains("v4.20728"), "os: {}", info.os_version);
+        assert!(
+            info.client_version.contains("v4.20728"),
+            "client: {}",
+            info.client_version
+        );
+        assert!(
+            info.os_version.contains("v4.20728"),
+            "os: {}",
+            info.os_version
+        );
         assert!(info.versions_match, "should match — same commit hash");
         assert_eq!(info.hardware_variant, "generic");
     }
@@ -366,8 +432,16 @@ OS......... Iceman/master/v4.20469-164-g0e95c62ad-suspect 2025-08-02 22:16:55 ef
     #[test]
     fn test_parse_real_pm3_mismatch() {
         let info = parse_detailed_hw_version(SAMPLE_REAL_MISMATCH);
-        assert!(info.client_version.contains("v4.20728"), "client: {}", info.client_version);
-        assert!(info.os_version.contains("v4.20469"), "os: {}", info.os_version);
+        assert!(
+            info.client_version.contains("v4.20728"),
+            "client: {}",
+            info.client_version
+        );
+        assert!(
+            info.os_version.contains("v4.20469"),
+            "os: {}",
+            info.os_version
+        );
         assert!(!info.versions_match, "should NOT match — different commits");
     }
 }

@@ -24,9 +24,7 @@ pub struct WipeResult {
 #[tauri::command]
 pub async fn detect_chip(app: AppHandle, port: String) -> Result<DetectChipResult, AppError> {
     // Validate port
-    if port.is_empty() || port.len() > 32 {
-        return Err(AppError::CommandFailed("Invalid port".into()));
-    }
+    connection::validate_port(&port)?;
 
     // Try T5577 first (most common LF blank)
     let t5577_output =
@@ -73,9 +71,7 @@ pub async fn wipe_chip(
     chip_type: String,
 ) -> Result<WipeResult, AppError> {
     // Validate port
-    if port.is_empty() || port.len() > 32 {
-        return Err(AppError::CommandFailed("Invalid port".into()));
-    }
+    connection::validate_port(&port)?;
 
     let wipe_cmd = match chip_type.as_str() {
         "T5577" => {

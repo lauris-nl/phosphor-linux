@@ -1,3 +1,4 @@
+use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 
 use regex::Regex;
@@ -37,6 +38,9 @@ pub struct FirmwareCheckResult {
     pub client_version: String,
     pub device_firmware_version: String,
     pub hardware_variant: String,
+    pub flash_size_kb: Option<u32>,
+    pub compatibility_state: String,
+    pub automatic_update_available: bool,
     pub firmware_path_exists: bool,
 }
 
@@ -55,7 +59,7 @@ pub struct FirmwareProgress {
 const VALID_VARIANTS: &[&str] = &["rdv4", "rdv4-bt", "generic", "generic-256"];
 
 static PORT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(COM[1-9]\d*|/dev/tty(ACM|USB)\d{1,2}|/dev/tty\.usbmodem\w+)$")
+    Regex::new(r"^(COM[1-9]\d*|/dev/tty(ACM|USB)\d{1,2}|/dev/serial/by-id/[A-Za-z0-9._:+-]+|/dev/tty\.usbmodem\w+)$")
         .expect("bad port regex")
 });
 
@@ -83,6 +87,9 @@ pub async fn check_firmware_version(
                     client_version: "bundled".to_string(),
                     device_firmware_version: "incompatible".to_string(),
                     hardware_variant: "unknown".to_string(),
+                    flash_size_kb: None,
+                    compatibility_state: "incompatible; hardware identity unavailable".to_string(),
+                    automatic_update_available: false,
                     firmware_path_exists: false,
                 });
             }
@@ -92,12 +99,25 @@ pub async fn check_firmware_version(
     let info = parse_detailed_hw_version(&output);
 
     let fw_exists = firmware_file_exists(&app, &info.hardware_variant);
+    // Generic clones can share an MCU while differing in FPGA, antenna,
+    // external flash and LED wiring. Never infer that a bundled image is safe.
+    let automatic_update_available =
+        matches!(info.hardware_variant.as_str(), "rdv4" | "rdv4-bt") && fw_exists;
+    let modern_version = modern_client_version().unwrap_or_else(|| info.client_version.clone());
+    let matched = crate::pm3::version::compare_versions(&modern_version, &info.os_version);
 
     Ok(FirmwareCheckResult {
-        matched: info.versions_match,
-        client_version: info.client_version,
+        matched,
+        client_version: modern_version,
         device_firmware_version: info.os_version,
         hardware_variant: info.hardware_variant,
+        flash_size_kb: info.flash_size_kb,
+        compatibility_state: if matched {
+            "compatible".to_string()
+        } else {
+            "incompatible; matched client/firmware migration required".to_string()
+        },
+        automatic_update_available,
         firmware_path_exists: fw_exists,
     })
 }
@@ -120,9 +140,10 @@ pub async fn flash_firmware(
 ) -> Result<(), AppError> {
     // Reject if a flash is already running
     {
-        let lock = flash_state.child.lock().map_err(|e| {
-            AppError::CommandFailed(format!("Flash state lock poisoned: {}", e))
-        })?;
+        let lock = flash_state
+            .child
+            .lock()
+            .map_err(|e| AppError::CommandFailed(format!("Flash state lock poisoned: {}", e)))?;
         if lock.is_some() {
             return Err(AppError::CommandFailed(
                 "A firmware flash is already in progress".into(),
@@ -143,10 +164,17 @@ pub async fn flash_firmware(
         )));
     }
 
+    if matches!(hardware_variant.as_str(), "generic" | "generic-256") {
+        return Err(AppError::CommandFailed(
+            "Automatic firmware flashing is disabled for generic clones; verify the exact MCU, flash size, FPGA and board wiring, then migrate with reviewed CLI artifacts".into(),
+        ));
+    }
+
     // Resolve firmware path from bundled resources
-    let resource_dir = app.path().resource_dir().map_err(|e| {
-        AppError::CommandFailed(format!("Failed to resolve resource dir: {}", e))
-    })?;
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| AppError::CommandFailed(format!("Failed to resolve resource dir: {}", e)))?;
     let fw_path = resource_dir
         .join("firmware")
         .join(&hardware_variant)
@@ -270,11 +298,7 @@ pub async fn flash_firmware(
             message: if success {
                 "Firmware flash complete!".into()
             } else if !stderr.is_empty() {
-                stderr
-                    .lines()
-                    .last()
-                    .unwrap_or("Flash failed")
-                    .to_string()
+                stderr.lines().last().unwrap_or("Flash failed").to_string()
             } else {
                 format!("Flash failed (exit code: {:?})", output.status.code())
             },
@@ -288,9 +312,10 @@ pub async fn flash_firmware(
 #[tauri::command]
 pub async fn cancel_flash(flash_state: State<'_, FlashState>) -> Result<(), AppError> {
     let child = {
-        let mut lock = flash_state.child.lock().map_err(|e| {
-            AppError::CommandFailed(format!("Flash state lock poisoned: {}", e))
-        })?;
+        let mut lock = flash_state
+            .child
+            .lock()
+            .map_err(|e| AppError::CommandFailed(format!("Flash state lock poisoned: {}", e)))?;
         lock.take()
     };
 
@@ -324,3 +349,17 @@ fn firmware_file_exists(app: &AppHandle, variant: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn modern_client_version() -> Option<String> {
+    let path = std::env::var_os("PHOSPHOR_MODERN_PM3_BIN")?;
+    let output = Command::new(path).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let clean = crate::pm3::output_parser::strip_ansi(&stdout);
+    clean.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Client:")
+            .map(|version| version.trim().to_string())
+    })
+}

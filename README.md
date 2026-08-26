@@ -1,77 +1,132 @@
-# Phosphor
+# Phosphor Linux
 
-Desktop GUI for Proxmark3. Scan, clone and manage RFID/NFC cards without touching the command line.
+Native Linux support for the [Phosphor](https://github.com/nikitaart2000/phosphor)
+Proxmark3 GUI.
 
-![Windows](https://img.shields.io/badge/Windows-10%2B-blue) ![License](https://img.shields.io/badge/license-GPL--3.0-green) ![Version](https://img.shields.io/badge/version-1.1.0-brightgreen)
+This project preserves Phosphor's upstream history and GPL-3.0 license while
+adding Linux USB-CDC discovery, current RRG/Iceman client integration, generic
+reader support, and fixes for reliable saved-tag and T55x7 write workflows.
+Original Phosphor was created by **nik shuv**; the Linux work is maintained
+separately by the Phosphor Linux project.
 
-## What it does
+> Use RFID read/write functionality only on tags and systems you own or are
+> authorized to test.
 
-Phosphor wraps the Proxmark3 client into a visual wizard. You plug in your Proxmark, place a card on the reader, and Phosphor handles the rest: identifying the card type, reading its data, detecting the right blank, and writing the clone. The whole process is point-and-click.
+## Verified Linux features
 
-**LF (125 kHz)** cards are cloned in seconds. **HF (13.56 MHz)** cards like MIFARE Classic go through automatic key recovery (autopwn) with real-time progress, then write to a magic card.
+- Native Tauri application on Linux (no Wine)
+- Current RRG/Iceman Proxmark3 client command syntax
+- USB-CDC discovery through `/dev/serial/by-id/`, `/dev/ttyACM*`, and
+  `/dev/ttyUSB*`
+- Optional explicit reader and client paths
+- PM3GENERIC hardware/version reporting without unsafe automatic clone flashing
+- LF and HF reader connectivity
+- T55x7 detection, wipe, write, and read-back verification
+- Actionable command, timeout, busy-port, incompatible-tag, and USB-disconnect
+  errors
+- Saved-card loading that remains separate from the physical `WRITE` action
+- Quiet production startup and an explicit development launcher
 
-## Supported cards
-
-### LF (125 kHz) - 22 types
-
-HID ProxII, EM4100, AWID, IOProx, Indala, FDX-B, HID Corporate 1000, Paradox, Keri, Viking, Visa2000, Noralsy, Presco, Jablotron, NexWatch, PAC/Stanley, SecuraKey, Gallagher, GProxII, Pyramid, NEDAP, T55x7
-
-### HF (13.56 MHz) - 6 types
-
-MIFARE Classic 1K/4K (with autopwn key recovery), MIFARE Ultralight, NTAG, iCLASS/PicoPass, DESFire (detection only, non-cloneable)
-
-### Supported magic blanks
-
-T5577 (LF), Gen1a, Gen2/CUID, Gen3, Gen4 GTU, Gen4 GDM/USCUID (HF)
+The Linux flow has been physically tested with a PM3GENERIC-compatible reader
+using an AT91SAM7S512 with 512 KB flash and matching current RRG firmware/client.
+That observation does **not** identify every generic or inexpensive clone:
+FPGA, flash, antenna, LED, and board wiring can differ.
 
 ## Requirements
 
-- **Proxmark3** device (Easy, RDV4, or compatible clone)
-- **Windows 10** or later (x64)
-- USB cable (data cable, not charge-only)
+- A Linux desktop with WebKitGTK/Tauri v2 build prerequisites
+- Node.js and npm
+- A current Rust toolchain
+- A current [RRG/Iceman Proxmark3](https://github.com/RfidResearchGroup/proxmark3)
+  client that matches the firmware on the reader
+- Permission to access the reader's serial device (commonly through the
+  distribution's `uucp` or `dialout` group)
 
-Proxmark3 firmware v4.20728+ recommended. Phosphor bundles its own PM3 client binary, so you don't need a separate Proxmark3 installation.
-
-## Installation
-
-1. Download `Phosphor_1.1.0_x64-setup.exe` from [Releases](../../releases)
-2. Run the installer
-3. Plug in your Proxmark3
-4. Launch Phosphor
-
-## Features
-
-- **One-click cloning** for LF and HF cards
-- **Auto-detection** of card type and frequency
-- **MIFARE Classic autopwn** with live progress (dictionary, nested, darkside, hardnested attacks)
-- **Magic card detection** identifies Gen1a through Gen4 GDM
-- **Blank card data check** warns if the blank already has data written to it
-- **Firmware flash** with variant picker (RDV4, RDV4+BT, Generic)
-- **T5577 chip detection** and password-protected chip handling
-- **Sound effects** and terminal-style UI
-
-## Building from source
+Install the platform packages listed in the
+[Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux),
+then confirm that the PM3 client works independently:
 
 ```bash
-# Prerequisites: Node.js 18+, Rust 1.70+, Proxmark3 client binary
-
-git clone https://github.com/nikitaart2000/phosphor.git
-cd phosphor
-npm install
-npx tauri dev      # development
-npx tauri build    # production build
+proxmark3 --version
+proxmark3 -p /dev/serial/by-id/your-proxmark-device -f -c "hw version"
 ```
 
-The PM3 client binary and its DLLs go in `src-tauri/binaries/` and `src-tauri/pm3-libs/`. See `tauri.conf.json` for the resource mapping.
+## Build and run
 
-## Tech stack
+```bash
+git clone https://github.com/lauris-nl/phosphor-linux.git
+cd phosphor-linux
+npm ci
+npm run build
+cargo build --release --manifest-path src-tauri/Cargo.toml
+./scripts/phosphor
+```
 
-Tauri v2, React 19, TypeScript, XState v5, Rust. Dual state machine architecture: Rust backend (WizardMachine) and frontend (XState) stay in sync through Tauri commands.
+The launcher prefers a unique Proxmark entry under `/dev/serial/by-id/`, falls back to a
+unique existing ACM/USB serial node, and finds `proxmark3` through `PATH`.
 
-## Author
+Override either path when discovery is ambiguous or the client is installed in
+a non-standard location:
 
-Created by **nik shuv**
+```bash
+PHOSPHOR_PM3_PORT=/dev/serial/by-id/your-proxmark-device \
+PHOSPHOR_MODERN_PM3_BIN=/opt/proxmark3/bin/proxmark3 \
+./scripts/phosphor
+```
+
+The configured PM3 executable must be the current RRG client matching the
+reader firmware. Legacy pre-RRG clients and firmware do not implement the
+modern command/protocol surface used by Phosphor.
+
+## Development
+
+Set the stable reader path explicitly for development:
+
+```bash
+PHOSPHOR_PM3_PORT=/dev/serial/by-id/your-proxmark-device \
+PHOSPHOR_MODERN_PM3_BIN=/path/to/proxmark3 \
+RUST_LOG=debug RUST_BACKTRACE=1 \
+./scripts/phosphor-dev
+```
+
+Run the validation suite with:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+npm run build
+git diff --check
+```
+
+`src-tauri/binaries/`, build output, PM3 logs, dumps, and saved-tag data are
+intentionally excluded from Git. This repository does not vendor the RRG source
+tree, a locally compiled PM3 client, firmware images, or private RFID data.
+
+## Firmware safety
+
+Ordinary Phosphor installation does not require flashing firmware when the
+reader already runs firmware compatible with the installed RRG client.
+
+Automatic firmware flashing is disabled for generic clones. Do not select an
+image based only on the words “generic,” “Easy,” MCU capacity, or a seller's
+listing. Hardware target identification, bootloader compatibility, recovery,
+and firmware migration must be reviewed separately for the exact board. This
+project does not publish or recommend a universal generic-clone firmware image.
+
+## Known limits
+
+- Hardware support is bounded by the commands implemented by the installed RRG
+  client and matching reader firmware.
+- DESFire is detection-only in the inherited workflow.
+- Generic-clone automatic firmware updates are intentionally unavailable.
+- Multiple connected serial readers require `PHOSPHOR_PM3_PORT`.
+
+## Upstream and dependencies
+
+- Original application: [nikitaart2000/phosphor](https://github.com/nikitaart2000/phosphor)
+- PM3 client/firmware: [RfidResearchGroup/proxmark3](https://github.com/RfidResearchGroup/proxmark3), a separate project and dependency
+- Linux project contact: [phosphor-linux@lauris.nl](mailto:phosphor-linux@lauris.nl)
 
 ## License
 
-[GPL-3.0](LICENSE) — Copyright 2025-2026 nik shuv
+[GPL-3.0](LICENSE). Original copyright and attribution are retained from
+upstream; subsequent Linux extensions are distributed under the same license.

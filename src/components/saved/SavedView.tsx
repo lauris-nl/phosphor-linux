@@ -45,6 +45,8 @@ export function SavedView() {
   const [cards, setCards] = useState<SavedCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadedCardKey, setLoadedCardKey] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const wizard = useWizard();
@@ -79,6 +81,7 @@ export function SavedView() {
     try {
       await deleteSavedCard(id);
       setExpandedId(null);
+      setLoadedCardKey(null);
       refresh();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message
@@ -88,17 +91,28 @@ export function SavedView() {
     }
   };
 
-  const handleClone = (card: SavedCard) => {
+  const handleUseSavedTag = async (card: SavedCard) => {
+    if (!wizard.context.port) {
+      setLoadError('Connect the Proxmark3 in SCAN before loading a saved tag.');
+      return;
+    }
     const decoded = parseDecoded(card.decoded);
-    wizard.loadSavedCard({
-      frequency: card.frequency,
-      cardType: card.cardType,
-      uid: card.uid,
-      raw: card.raw,
-      decoded,
-      cloneable: card.cloneable,
-      recommendedBlank: card.recommendedBlank,
-    });
+    setLoadError(null);
+    try {
+      await wizard.loadSavedCard({
+        frequency: card.frequency,
+        cardType: card.cardType,
+        uid: card.uid,
+        raw: card.raw,
+        decoded,
+        cloneable: card.cloneable,
+        recommendedBlank: card.recommendedBlank,
+      });
+      setLoadedCardKey(`${card.id ?? 'saved'}:${card.uid}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      setLoadError(`Could not load this saved tag: ${message}`);
+    }
   };
 
   // Loading state
@@ -166,6 +180,9 @@ export function SavedView() {
   }
 
   const expanded = expandedId !== null ? cards.find(c => c.id === expandedId) : null;
+  const expandedIsLoaded = expanded
+    ? loadedCardKey === `${expanded.id ?? 'saved'}:${expanded.uid}`
+    : false;
 
   return (
     <TerminalPanel title="SAVED CARDS">
@@ -271,19 +288,42 @@ export function SavedView() {
             );
           })()}
 
+          <div style={{ color: 'var(--green-dim)', marginTop: '8px', fontSize: '11px' }}>
+            USE SAVED TAG loads this saved data into the workflow. WRITE changes the physical target tag.
+          </div>
+
+          {expandedIsLoaded && (
+            <div style={{ color: 'var(--green-bright)', marginTop: '8px' }}>
+              [+] {expanded.name} is loaded. Open WRITE to detect the target tag.
+            </div>
+          )}
+
+          {loadError && (
+            <div style={{ color: 'var(--amber)', marginTop: '8px' }}>
+              [!] {loadError}
+            </div>
+          )}
+
           {/* Action buttons */}
           <div style={{ marginTop: '10px', display: 'flex', gap: '8px' }}>
             <button
-              onClick={(e) => { e.stopPropagation(); handleClone(expanded); }}
+              onClick={(e) => { e.stopPropagation(); void handleUseSavedTag(expanded); }}
+              disabled={!wizard.context.port || expandedIsLoaded}
               style={{
                 ...buttonStyle,
-                color: 'var(--green-bright)',
-                borderColor: 'var(--green-bright)',
+                color: wizard.context.port ? 'var(--green-bright)' : 'var(--green-dim)',
+                borderColor: wizard.context.port ? 'var(--green-bright)' : 'var(--green-dim)',
+                cursor: wizard.context.port && !expandedIsLoaded ? 'pointer' : 'not-allowed',
+                opacity: wizard.context.port && !expandedIsLoaded ? 1 : 0.6,
               }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(0, 255, 65, 0.1)'; }}
+              onMouseEnter={(e) => { if (wizard.context.port && !expandedIsLoaded) e.currentTarget.style.background = 'rgba(0, 255, 65, 0.1)'; }}
               onMouseLeave={(e) => { e.currentTarget.style.background = 'none'; }}
             >
-              CLONE THIS
+              {!wizard.context.port
+                ? 'CONNECT READER FIRST'
+                : expandedIsLoaded
+                  ? 'LOADED ✓'
+                  : 'USE SAVED TAG'}
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); if (expanded.id !== null) handleDelete(expanded.id); }}

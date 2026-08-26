@@ -50,6 +50,8 @@ export interface WizardContext {
   blankType: BlankType | null;
   readyToWrite: boolean;
   blankExistingData: string | null;
+  /** Re-detection immediately after an intentional wipe must not search for a credential. */
+  blankWasWiped: boolean;
 
   // Write progress
   writeProgress: number;
@@ -75,6 +77,9 @@ export interface WizardContext {
   clientVersion: string | null;
   deviceFirmwareVersion: string | null;
   hardwareVariant: 'rdv4' | 'rdv4-bt' | 'generic' | 'generic-256' | 'unknown' | null;
+  flashSizeKb: number | null;
+  compatibilityState: string | null;
+  automaticUpdateAvailable: boolean;
   firmwarePathExists: boolean;
   firmwareProgress: number;
   firmwareMessage: string | null;
@@ -100,6 +105,7 @@ const initialContext: WizardContext = {
   blankType: null,
   readyToWrite: false,
   blankExistingData: null,
+  blankWasWiped: false,
   writeProgress: 0,
   currentBlock: null,
   totalBlocks: null,
@@ -115,6 +121,9 @@ const initialContext: WizardContext = {
   clientVersion: null,
   deviceFirmwareVersion: null,
   hardwareVariant: null,
+  flashSizeKb: null,
+  compatibilityState: null,
+  automaticUpdateAvailable: false,
   firmwarePathExists: true,
   firmwareProgress: 0,
   firmwareMessage: null,
@@ -136,6 +145,7 @@ const clearCardFields: Partial<WizardContext> = {
   blankType: null,
   readyToWrite: false,
   blankExistingData: null,
+  blankWasWiped: false,
   writeProgress: 0,
   currentBlock: null,
   totalBlocks: null,
@@ -206,7 +216,7 @@ export const wizardMachine = setup({
     }),
     detectBlank: fromPromise<WizardState, WizardContext>(async ({ input }) => {
       if (!input.port) throw new Error('No device port available');
-      return api.detectBlank(input.port);
+      return api.detectBlank(input.port, input.blankWasWiped);
     }),
     writeClone: fromPromise<WizardState, WizardContext>(async ({ input }) => {
       if (!input.port) throw new Error('No device port available');
@@ -331,6 +341,9 @@ export const wizardMachine = setup({
               clientVersion: ({ event }) => event.output.clientVersion,
               deviceFirmwareVersion: ({ event }) => event.output.deviceFirmwareVersion,
               hardwareVariant: ({ event }) => event.output.hardwareVariant,
+              flashSizeKb: ({ event }) => event.output.flashSizeKb,
+              compatibilityState: ({ event }) => event.output.compatibilityState,
+              automaticUpdateAvailable: ({ event }) => event.output.automaticUpdateAvailable,
               firmwarePathExists: ({ event }) => event.output.firmwarePathExists,
             }),
           },
@@ -341,6 +354,9 @@ export const wizardMachine = setup({
               clientVersion: ({ event }) => event.output.clientVersion,
               deviceFirmwareVersion: ({ event }) => event.output.deviceFirmwareVersion,
               hardwareVariant: ({ event }) => event.output.hardwareVariant,
+              flashSizeKb: ({ event }) => event.output.flashSizeKb,
+              compatibilityState: ({ event }) => event.output.compatibilityState,
+              automaticUpdateAvailable: ({ event }) => event.output.automaticUpdateAvailable,
               firmwarePathExists: ({ event }) => event.output.firmwarePathExists,
             }),
           },
@@ -363,7 +379,8 @@ export const wizardMachine = setup({
         SELECT_VARIANT: {
           actions: assign({
             hardwareVariant: ({ event }) => event.variant,
-            firmwarePathExists: () => true,
+            automaticUpdateAvailable: () => false,
+            firmwarePathExists: () => false,
           }),
         },
         UPDATE_FIRMWARE: {
@@ -584,6 +601,7 @@ export const wizardMachine = setup({
           target: 'waitingForBlank',
           actions: assign({
             expectedBlank: ({ event }) => event.expectedBlank,
+            blankWasWiped: () => false,
           }),
         },
         START_HF_PROCESS: {
@@ -666,6 +684,7 @@ export const wizardMachine = setup({
           target: 'waitingForBlank',
           actions: assign({
             expectedBlank: ({ event }) => event.expectedBlank,
+            blankWasWiped: () => false,
           }),
         },
         BACK_TO_SCAN: {
@@ -700,6 +719,7 @@ export const wizardMachine = setup({
                 if (ws.step === 'BlankDetected') return ws.data.existing_data_type;
                 return null;
               },
+              blankWasWiped: () => false,
             }),
           },
           {
@@ -741,6 +761,7 @@ export const wizardMachine = setup({
             blankType: () => null,
             readyToWrite: () => false,
             blankExistingData: () => null,
+            blankWasWiped: () => true,
           }),
         },
         RESET: { target: 'idle', actions: assign(() => initialContext) },
@@ -790,7 +811,13 @@ export const wizardMachine = setup({
           target: 'error',
           actions: assign({
             errorMessage: ({ event }) => stripSystemPaths(extractErrorMessage(event.error)),
-            errorUserMessage: () => 'Write operation failed. Do not remove the card.',
+            errorUserMessage: ({ event }) => {
+              const message = stripSystemPaths(extractErrorMessage(event.error));
+              if (message.toLowerCase().includes('invalid port')) {
+                return 'PM3 command could not use the configured serial port.';
+              }
+              return `PM3 command failed: ${message}`;
+            },
             errorRecoverable: () => true,
             errorRecoveryAction: () => 'Retry' as RecoveryAction,
             errorSource: () => 'write' as const,
@@ -901,4 +928,3 @@ export const wizardMachine = setup({
     },
   },
 });
-

@@ -8,6 +8,9 @@ interface FirmwareUpdateStepProps {
   clientVersion?: string | null;
   deviceFirmwareVersion?: string | null;
   hardwareVariant?: string | null;
+  flashSizeKb?: number | null;
+  compatibilityState?: string | null;
+  automaticUpdateAvailable?: boolean;
   firmwarePathExists?: boolean;
   firmwareProgress?: number;
   firmwareMessage?: string | null;
@@ -16,12 +19,6 @@ interface FirmwareUpdateStepProps {
   onCancel: () => void;
   onSelectVariant?: (variant: 'rdv4' | 'rdv4-bt' | 'generic') => void;
 }
-
-const VARIANT_OPTIONS: { id: 'rdv4' | 'rdv4-bt' | 'generic'; label: string }[] = [
-  { id: 'rdv4', label: 'PROXMARK3 RDV4' },
-  { id: 'rdv4-bt', label: 'RDV4 + BLUESHARK' },
-  { id: 'generic', label: 'PM3 EASY / CLONE' },
-];
 
 const btnBase: React.CSSProperties = {
   background: 'var(--bg-void)',
@@ -40,13 +37,15 @@ export function FirmwareUpdateStep({
   clientVersion,
   deviceFirmwareVersion,
   hardwareVariant,
+  flashSizeKb,
+  compatibilityState,
+  automaticUpdateAvailable = false,
   firmwarePathExists = true,
   firmwareProgress = 0,
   firmwareMessage,
   onUpdate,
   onSkip,
   onCancel,
-  onSelectVariant,
 }: FirmwareUpdateStepProps) {
   const sfx = useSfx();
   const [dots, setDots] = useState('');
@@ -128,39 +127,17 @@ export function FirmwareUpdateStep({
     );
   }
 
-  // step === 'FirmwareOutdated' — variant picker when hardware is unknown
+  // An unknown board must never be converted into a flash target by a UI pick.
   if (hardwareVariant === 'unknown' || !hardwareVariant) {
     return (
-      <TerminalPanel title="SELECT HARDWARE">
+      <TerminalPanel title="HARDWARE NOT VERIFIED">
         <div style={{ fontSize: '13px', lineHeight: '1.8' }}>
           <div style={{ color: 'var(--amber)', marginBottom: '12px' }}>
             [!] Firmware mismatch — hardware variant could not be detected automatically.
           </div>
           <div style={{ color: 'var(--green-dim)', fontSize: '12px', marginBottom: '16px' }}>
-            Select your Proxmark3 model to flash the correct firmware:
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px' }}>
-            {VARIANT_OPTIONS.map((opt) => (
-              <button
-                key={opt.id}
-                onClick={() => { sfx.action(); onSelectVariant?.(opt.id); }}
-                style={{
-                  ...btnBase,
-                  padding: '10px 16px',
-                  textAlign: 'left',
-                }}
-                onMouseEnter={(e) => {
-                  sfx.hover();
-                  e.currentTarget.style.background = 'var(--green-ghost)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'var(--bg-void)';
-                }}
-              >
-                {opt.label}
-              </button>
-            ))}
+            Automatic flashing is unavailable. Identify the MCU, flash size, FPGA and board wiring,
+            then use a reviewed migration package outside Phosphor.
           </div>
 
           <button
@@ -206,8 +183,16 @@ export function FirmwareUpdateStep({
           <span style={{ color: 'var(--green-dim)' }}>HW:      </span>
           <span style={{ color: 'var(--green-bright)' }}>{hardwareVariant}</span>
         </div>
+        <div style={{ marginBottom: '4px' }}>
+          <span style={{ color: 'var(--green-dim)' }}>Flash:   </span>
+          <span style={{ color: 'var(--green-bright)' }}>{flashSizeKb ? `${flashSizeKb} KB` : 'unknown'}</span>
+        </div>
+        <div style={{ marginBottom: '12px' }}>
+          <span style={{ color: 'var(--green-dim)' }}>State:   </span>
+          <span style={{ color: 'var(--red-bright)' }}>{compatibilityState ?? 'unknown'}</span>
+        </div>
 
-        {firmwarePathExists ? (
+        {automaticUpdateAvailable && firmwarePathExists ? (
           <>
             <div style={{ color: 'var(--green-dim)', fontSize: '12px', marginBottom: '16px' }}>
               Updating firmware ensures all commands work correctly.
@@ -251,9 +236,10 @@ export function FirmwareUpdateStep({
         ) : (
           <>
             <div style={{ color: 'var(--amber)', fontSize: '12px', marginBottom: '12px' }}>
-              [!] No bundled firmware for this hardware variant ({hardwareVariant}).
+              [!] Automatic firmware is unavailable for this hardware ({hardwareVariant}).
               <br />
-              Flash manually via CLI: proxmark3 --flash --image fullimage.elf
+              No image or flash command is inferred from the generic label. Use only a reviewed
+              migration package that matches this board's MCU, flash size, FPGA and wiring.
             </div>
 
             <button

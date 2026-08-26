@@ -3,6 +3,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { WizardState, CloneRecord, BlankType, FirmwareCheckResult } from '../machines/types';
 
+/** The one supported LF write entry point. Keep UI code behind this wrapper. */
+export const LF_CLONE_COMMAND = 'write_clone_with_data' as const;
+
 export interface SavedCard {
   id: number | null;
   name: string;
@@ -36,8 +39,8 @@ export async function scanCard(): Promise<WizardState> {
  * Detect blank card on reader.
  * Runs lf t55xx detect (for T5577) or lf em 4x05 info (for EM4305) on the backend.
  */
-export async function detectBlank(port: string): Promise<WizardState> {
-  return invoke<WizardState>('detect_blank', { port });
+export async function detectBlank(port: string, afterWipe = false): Promise<WizardState> {
+  return invoke<WizardState>('detect_blank', { port, afterWipe });
 }
 
 /**
@@ -51,7 +54,12 @@ export async function writeCloneWithData(
   decoded: Record<string, string>,
   blankType?: string,
 ): Promise<WizardState> {
-  return invoke<WizardState>('write_clone_with_data', {
+  console.debug(`[phosphor:invoke] ${LF_CLONE_COMMAND}`, {
+    port,
+    cardType,
+    blankType: blankType ?? null,
+  });
+  return invoke<WizardState>(LF_CLONE_COMMAND, {
     port,
     cardType,
     uid,

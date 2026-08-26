@@ -35,6 +35,9 @@ export function WizardContainer() {
             clientVersion={wizard.context.clientVersion}
             deviceFirmwareVersion={wizard.context.deviceFirmwareVersion}
             hardwareVariant={wizard.context.hardwareVariant}
+            flashSizeKb={wizard.context.flashSizeKb}
+            compatibilityState={wizard.context.compatibilityState}
+            automaticUpdateAvailable={wizard.context.automaticUpdateAvailable}
             firmwarePathExists={wizard.context.firmwarePathExists}
             onUpdate={wizard.updateFirmware}
             onSkip={wizard.skipFirmware}
@@ -224,7 +227,9 @@ export function WizardContainer() {
             recoverable={wizard.context.errorRecoverable}
             recoveryAction={wizard.context.errorRecoveryAction}
             errorSource={wizard.context.errorSource}
-            onRetry={wizard.reset}
+            onRetry={wizard.context.errorRecoveryAction === 'Reconnect'
+              ? wizard.reset
+              : wizard.softReset}
             onReset={wizard.reset}
           />
         );

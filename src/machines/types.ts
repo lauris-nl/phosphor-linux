@@ -167,6 +167,9 @@ export interface FirmwareCheckResult {
   clientVersion: string;
   deviceFirmwareVersion: string;
   hardwareVariant: 'rdv4' | 'rdv4-bt' | 'generic' | 'generic-256' | 'unknown';
+  flashSizeKb: number | null;
+  compatibilityState: string;
+  automaticUpdateAvailable: boolean;
   firmwarePathExists: boolean;
 }
 

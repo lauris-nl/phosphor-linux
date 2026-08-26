@@ -6,6 +6,10 @@ use crate::error::AppError;
 use crate::pm3::{command_builder, connection, output_parser};
 use crate::state::{WizardAction, WizardMachine, WizardState};
 
+fn should_search_t5577_credential(after_wipe: bool) -> bool {
+    !after_wipe
+}
+
 /// Detect whether a blank card is present on the reader.
 ///
 /// The FSM must be in `WaitingForBlank` state. On success, transitions to
@@ -18,6 +22,7 @@ use crate::state::{WizardAction, WizardMachine, WizardState};
 pub async fn detect_blank(
     app: AppHandle,
     port: String,
+    after_wipe: bool,
     machine: State<'_, Mutex<WizardMachine>>,
 ) -> Result<WizardState, AppError> {
     // Validate we're in WaitingForBlank and extract expected blank type
@@ -37,7 +42,7 @@ pub async fn detect_blank(
 
     // Detect based on expected blank type
     match expected_blank {
-        BlankType::T5577 => detect_t5577(&app, &port, &machine).await,
+        BlankType::T5577 => detect_t5577(&app, &port, &machine, after_wipe).await,
         BlankType::EM4305 => detect_em4305(&app, &port, &machine).await,
         BlankType::MagicMifareGen1a
         | BlankType::MagicMifareGen2
@@ -51,24 +56,31 @@ pub async fn detect_blank(
     }
 }
 
-/// Run `lf t55xx detect` to confirm a T5577 is present, then `lf search` to
-/// check if the card already has data written to it.
+/// Run `lf t55xx detect` to confirm a T5577 is present. Before an initial
+/// write, also use `lf search` to report existing credential data. Immediately
+/// after an intentional wipe, the absence of a credential is expected and the
+/// T55x7-specific detection result is sufficient verification.
 async fn detect_t5577(
     app: &AppHandle,
     port: &str,
     machine: &State<'_, Mutex<WizardMachine>>,
+    after_wipe: bool,
 ) -> Result<WizardState, AppError> {
     let output = connection::run_command(app, port, command_builder::build_t5577_detect()).await?;
     let status = output_parser::parse_t5577_detect(&output);
 
     if status.detected {
-        // Check if the card already has data by running lf search
-        let existing_data_type = match connection::run_command(app, port, "lf search").await {
-            Ok(search_output) => {
-                output_parser::parse_lf_search(&search_output)
-                    .map(|(card_type, _)| format!("{:?}", card_type))
+        // A wiped T5577 should contain no known credential. Do not run the
+        // generic search here: current RRG intentionally returns exit 246 for
+        // that empty state, which is not a device or write failure.
+        let existing_data_type = if should_search_t5577_credential(after_wipe) {
+            match connection::run_command(app, port, "lf search").await {
+                Ok(search_output) => output_parser::parse_lf_search(&search_output)
+                    .map(|(card_type, _)| format!("{:?}", card_type)),
+                Err(_) => None,
             }
-            Err(_) => None,
+        } else {
+            None
         };
 
         let mut m = machine.lock().map_err(|e| {
@@ -91,6 +103,29 @@ async fn detect_t5577(
             recovery_action: Some(RecoveryAction::Retry),
         })?;
         Ok(m.current.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_search_t5577_credential;
+    use crate::pm3::output_parser;
+
+    #[test]
+    fn wiped_t5577_skips_empty_lf_search_and_remains_writable() {
+        // Real current-RRG shape after `lf t55xx wipe`. A generic `lf search`
+        // would now return exit 246 because there is deliberately no encoded
+        // credential, but T55x7 detection is the correct wipe verification.
+        let output = "[+] Chip type......... T55x7\n\
+                      [+] Block0............ 000880E0\n\
+                      [+] Password set...... No\n";
+        let status = output_parser::parse_t5577_detect(output);
+
+        assert!(status.detected);
+        assert!(!status.password_set);
+        assert_eq!(status.block0.as_deref(), Some("000880E0"));
+        assert!(!should_search_t5577_credential(true));
+        assert!(should_search_t5577_credential(false));
     }
 }
 

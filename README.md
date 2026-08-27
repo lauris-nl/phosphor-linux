@@ -117,6 +117,16 @@ The configured PM3 executable must be the current RRG client matching the
 reader firmware. Legacy pre-RRG clients and firmware do not implement the
 modern command/protocol surface used by Phosphor.
 
+The packaged GUI resolves the client in this order: the
+`PHOSPHOR_MODERN_PM3_BIN` override, the path selected previously in Phosphor,
+`proxmark3` in the inherited `PATH`, `/usr/local/bin/proxmark3`,
+`/usr/bin/proxmark3`, then `$HOME/.local/bin/proxmark3`. If none is usable,
+choose **LOCATE PROXMARK3** in the connection screen. Phosphor validates the
+RRG/Iceman client and stores the selected path in the platform application
+configuration directory (normally
+`$HOME/.config/com.phosphor.app/pm3-client.json` on Linux). Settings shows the
+active path and its discovery source.
+
 ## Development
 
 Set the stable reader path explicitly for development:
@@ -175,9 +185,11 @@ Tauri documentation. Building on a newer system can require a newer glibc.
 The AppImage bundles Phosphor and its media framework, but deliberately does not
 bundle `proxmark3`. Bundling RRG later would require a reviewed update policy and
 GPL source/distribution plan. Until then, users install a matching current RRG
-client separately or set `PHOSPHOR_MODERN_PM3_BIN`.
+client separately. A double-clicked AppImage can locate it from the connection
+screen; `PHOSPHOR_MODERN_PM3_BIN` remains available as an explicit override.
 
-No Linux package or firmware image is currently published as a GitHub Release.
+Linux application packages are published on the GitHub Releases page. PM3
+firmware and the separate RRG client are not included in those packages.
 
 `src-tauri/binaries/`, build output, PM3 logs, dumps, and saved-tag data are
 intentionally excluded from Git. This repository does not vendor the RRG source

@@ -20,6 +20,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = app
@@ -37,6 +38,9 @@ pub fn run() {
             commands::wizard::get_wizard_state,
             commands::wizard::wizard_action,
             commands::device::detect_device,
+            pm3::client::get_pm3_client_info,
+            pm3::client::set_pm3_client_path,
+            pm3::client::choose_pm3_client,
             commands::blank::detect_blank,
             commands::scan::scan_card,
             commands::write::write_clone_with_data,

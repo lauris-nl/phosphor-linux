@@ -6,6 +6,39 @@ import type { WizardState, CloneRecord, BlankType, FirmwareCheckResult } from '.
 /** The one supported LF write entry point. Keep UI code behind this wrapper. */
 export const LF_CLONE_COMMAND = 'write_clone_with_data' as const;
 
+export interface Pm3ClientInfo {
+  path: string;
+  source: string;
+  version: string;
+}
+
+export function invokeErrorMessage(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object') {
+    const value = Object.values(error)[0];
+    if (typeof value === 'string') return value;
+    return JSON.stringify(error);
+  }
+  return String(error);
+}
+
+export async function getPm3ClientInfo(): Promise<Pm3ClientInfo> {
+  return invoke<Pm3ClientInfo>('get_pm3_client_info');
+}
+
+export async function setPm3ClientPath(path: string): Promise<Pm3ClientInfo> {
+  return invoke<Pm3ClientInfo>('set_pm3_client_path', { path });
+}
+
+/** Select and validate a PM3 executable. The backend invokes it directly,
+ * with fixed argv and without passing anything through a command shell. */
+export async function locatePm3Client(): Promise<Pm3ClientInfo | null> {
+  const selected = await invoke<string | null>('choose_pm3_client');
+  if (!selected) return null;
+  return setPm3ClientPath(selected);
+}
+
 export interface SavedCard {
   id: number | null;
   name: string;

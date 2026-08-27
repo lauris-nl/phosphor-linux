@@ -310,7 +310,10 @@ export const wizardMachine = setup({
                 return 'No Proxmark3 device found. Check USB connection and try again.';
               },
               errorRecoverable: () => true,
-              errorRecoveryAction: () => 'Reconnect' as RecoveryAction,
+              errorRecoveryAction: ({ event }) => {
+                const ws = event.output;
+                return ws.step === 'Error' ? ws.data.recovery_action : 'Reconnect' as RecoveryAction;
+              },
               errorSource: () => 'detect' as const,
             }),
           },

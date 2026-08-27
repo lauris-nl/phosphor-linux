@@ -203,22 +203,22 @@ pub async fn hf_autopwn(
     }
 }
 
-/// Cancel a running HF operation (autopwn, dump, write) by killing the child process.
+/// Cancel a running HF operation (autopwn, dump, write).
 #[tauri::command]
 pub async fn cancel_hf_operation(
     hf_state: tauri::State<'_, HfOperationState>,
 ) -> Result<(), AppError> {
-    let child = {
-        let mut lock = hf_state.child.lock().map_err(|e| {
+    let cancel = {
+        let mut lock = hf_state.cancel.lock().map_err(|e| {
             AppError::CommandFailed(format!("HF state lock poisoned: {}", e))
         })?;
         lock.take()
     };
 
-    match child {
-        Some(child) => {
-            child.kill().map_err(|e| {
-                AppError::CommandFailed(format!("Failed to kill HF process: {}", e))
+    match cancel {
+        Some(cancel) => {
+            cancel.send(()).map_err(|_| {
+                AppError::CommandFailed("HF process already exited".into())
             })?;
             Ok(())
         }

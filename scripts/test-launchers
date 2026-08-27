@@ -11,9 +11,8 @@ trap 'rm -r -- "$test_dir"' EXIT
 
 bash -n "$launcher" "$dev_launcher" "$appimage_apprun" "$appimage_finalizer"
 
-if ! grep -q 'PHOSPHOR_MODERN_PM3_BIN' "$appimage_apprun" ||
-    ! grep -q 'export PATH=' "$appimage_apprun"; then
-    echo "AppImage launcher does not honor the configured Proxmark3 client" >&2
+if grep -q 'PHOSPHOR_MODERN_PM3_BIN\|command -v proxmark3' "$appimage_apprun"; then
+    echo "AppImage launcher must leave PM3 discovery to the packaged backend" >&2
     exit 1
 fi
 
@@ -33,17 +32,15 @@ chmod +x "$test_dir/proxmark3"
 
 mkdir -p "$test_dir/appimage/usr/bin"
 cp "$appimage_apprun" "$test_dir/appimage/AppRun"
-printf '#!/usr/bin/env sh\ncommand -v proxmark3\n' >"$test_dir/appimage/usr/bin/phosphor"
-printf '#!/usr/bin/env sh\ncommand -v proxmark3\n' >"$test_dir/appimage/AppRun.wrapped"
+printf '#!/usr/bin/env sh\nprintf "packaged backend started\\n"\n' >"$test_dir/appimage/usr/bin/phosphor"
+printf '#!/usr/bin/env sh\nprintf "packaged backend started\\n"\n' >"$test_dir/appimage/AppRun.wrapped"
 chmod +x "$test_dir/appimage/AppRun" "$test_dir/appimage/AppRun.wrapped" \
     "$test_dir/appimage/usr/bin/phosphor"
 
-appimage_client_path="$({
-    PHOSPHOR_MODERN_PM3_BIN="$test_dir/proxmark3" \
-        "$test_dir/appimage/AppRun"
-} 2>&1)"
-if [[ "$appimage_client_path" != "$test_dir/proxmark3" ]]; then
-    echo "AppImage launcher did not put the configured client on PATH" >&2
+appimage_result="$(env -u PHOSPHOR_MODERN_PM3_BIN -u PHOSPHOR_PM3_PORT \
+    PATH=/usr/bin:/bin "$test_dir/appimage/AppRun" 2>&1)"
+if [[ "$appimage_result" != "packaged backend started" ]]; then
+    echo "AppImage launcher still requires launcher-side PM3 configuration" >&2
     exit 1
 fi
 

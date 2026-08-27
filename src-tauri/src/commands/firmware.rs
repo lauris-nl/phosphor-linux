@@ -1,4 +1,3 @@
-use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 
 use regex::Regex;
@@ -7,6 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::ShellExt;
 
 use crate::error::AppError;
+use crate::pm3::client;
 use crate::pm3::connection;
 use crate::pm3::version::parse_detailed_hw_version;
 
@@ -103,7 +103,16 @@ pub async fn check_firmware_version(
     // external flash and LED wiring. Never infer that a bundled image is safe.
     let automatic_update_available =
         matches!(info.hardware_variant.as_str(), "rdv4" | "rdv4-bt") && fw_exists;
-    let modern_version = modern_client_version().unwrap_or_else(|| info.client_version.clone());
+    let modern_version = client::resolve_client(&app)
+        .await
+        .ok()
+        .and_then(|client| {
+            client.version
+                .strip_prefix("Client:")
+                .map(str::trim)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| info.client_version.clone());
     let matched = crate::pm3::version::compare_versions(&modern_version, &info.os_version);
 
     Ok(FirmwareCheckResult {
@@ -347,19 +356,4 @@ fn firmware_file_exists(app: &AppHandle, variant: &str) -> bool {
                 .exists()
         })
         .unwrap_or(false)
-}
-
-fn modern_client_version() -> Option<String> {
-    let path = std::env::var_os("PHOSPHOR_MODERN_PM3_BIN")?;
-    let output = Command::new(path).arg("--version").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let clean = crate::pm3::output_parser::strip_ansi(&stdout);
-    clean.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("Client:")
-            .map(|version| version.trim().to_string())
-    })
 }

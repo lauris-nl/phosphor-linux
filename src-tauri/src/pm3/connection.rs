@@ -5,11 +5,13 @@ use std::time::Duration;
 use regex::Regex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_shell::process::{CommandChild, CommandEvent};
-use tauri_plugin_shell::ShellExt;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 use crate::error::AppError;
+use crate::pm3::client;
 use crate::pm3::output_parser::strip_ansi;
 
 /// Payload emitted as `pm3-output` events for the live terminal panel.
@@ -39,29 +41,6 @@ pub fn emit_output(app: &AppHandle, text: &str, is_error: bool) {
 
 /// Maximum time to wait for a PM3 subprocess to complete (30 seconds).
 const PM3_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Returns the ordered list of Tauri shell scope names to try when spawning the
-/// PM3 binary. The first entry (`"proxmark3"`) resolves via PATH; subsequent
-/// entries are platform-specific absolute paths registered in the shell scope.
-/// This lets users who installed PM3 outside of PATH (common on Windows) still
-/// use the app without manually editing their system PATH.
-fn pm3_scope_names() -> Vec<&'static str> {
-    let mut names = vec!["proxmark3"];
-
-    if cfg!(target_os = "windows") {
-        names.push("proxmark3-win-c");
-        names.push("proxmark3-win-progfiles");
-    } else if cfg!(target_os = "macos") {
-        names.push("proxmark3-mac-local");
-        names.push("proxmark3-mac-brew");
-    } else {
-        // Linux and other unix-like
-        names.push("proxmark3-linux-local");
-        names.push("proxmark3-linux-usr");
-    }
-
-    names
-}
 
 /// Validates that a port string matches expected serial port patterns.
 /// Accepts COM1-COM256+ (Windows), /dev/ttyACM0-99, /dev/ttyUSB0-99 (Linux),
@@ -117,6 +96,22 @@ fn pm3_args(port: &str, cmd: &str) -> Vec<String> {
     }
 }
 
+fn validate_command_input(port: &str, cmd: &str) -> Result<(), AppError> {
+    validate_port(port)?;
+    if cmd.contains(';')
+        || cmd.contains('\n')
+        || cmd.contains('\r')
+        || port.contains(';')
+        || port.contains('\n')
+        || port.contains('\r')
+    {
+        return Err(AppError::CommandFailed(
+            "Invalid characters in command".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Preserve both process streams in non-zero-exit diagnostics. Current RRG
 /// prints command results to stdout but can also write incidental diagnostics
 /// to stderr; selecting stderr alone loses useful results such as the explicit
@@ -134,108 +129,64 @@ fn process_error_detail(stdout: &str, stderr: &str) -> String {
 }
 
 /// Internal PM3 execution that does NOT emit to the frontend.
-/// Handles: port validation, command sanitization, sidecar fallback, PATH lookup,
-/// process spawn, output collection, ANSI stripping, and timeout.
+/// Handles port/command validation, resolved-client execution, output collection,
+/// ANSI stripping, and timeout. The executable and every argument are passed
+/// directly to the OS; no command shell is involved.
 /// Returns the cleaned output string on success.
 async fn execute_pm3(app: &AppHandle, port: &str, cmd: &str) -> Result<String, AppError> {
-    // Validate port format to prevent command injection via subprocess args
-    validate_port(port)?;
+    // PM3's `-c` accepts its own separators, so reject them before building
+    // argv. The executable is never invoked through a shell.
+    validate_command_input(port, cmd)?;
 
-    // Reject command strings containing PM3 command separators or newlines.
-    // The PM3 CLI's `-c` flag treats `;` as a delimiter, so a crafted value
-    // like "AA;lf t55xx wipe" would execute two commands. Block this at the
-    // chokepoint so no caller can accidentally pass through unsanitised input.
-    if cmd.contains(';') || cmd.contains('\n') || cmd.contains('\r') {
-        return Err(AppError::CommandFailed(
-            "Invalid characters in command".into(),
-        ));
-    }
-    if port.contains(';') || port.contains('\n') || port.contains('\r') {
-        return Err(AppError::CommandFailed(
-            "Invalid characters in command".into(),
-        ));
-    }
+    let resolved = client::resolve_client(app).await?;
+    let args = pm3_args(port, cmd);
+    let mut command = Command::new(&resolved.path);
+    command.args(&args).kill_on_drop(true);
+    let output = match timeout(PM3_COMMAND_TIMEOUT, command.output()).await {
+        Err(_) => {
+            return Err(AppError::Timeout(format!(
+                "PM3 command timed out after {}s: {}",
+                PM3_COMMAND_TIMEOUT.as_secs(),
+                cmd
+            )))
+        }
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(AppError::SerialPermissionDenied(port.into()))
+        }
+        Ok(Err(e)) => {
+            return Err(AppError::CommandFailed(format!(
+                "Failed to start configured Proxmark3 client: {e}"
+            )))
+        }
+        Ok(Ok(output)) => output,
+    };
 
-    // 1) Try bundled sidecar binary first (available in production builds).
-    //    In dev mode the sidecar won't exist, so this silently falls through.
-    match try_sidecar_silent(app, port, cmd).await {
-        Ok(output) => return Ok(output),
-        Err(e)
-            if e.to_string().contains("Sidecar not available")
-                || e.to_string().contains("Failed to run sidecar") =>
-        { /* sidecar could not be spawned -- fall through to configured commands */ }
-        // The sidecar did run. Preserve its timeout, exit status and diagnostic
-        // instead of replacing a protocol error with a bogus PATH error.
-        Err(e) => return Err(e),
-    }
+    let code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    log::debug!(
+        "PM3 subprocess exited: executable={}, code={}, stdout_bytes={}, stderr_bytes={}",
+        resolved.path,
+        code,
+        output.stdout.len(),
+        output.stderr.len()
+    );
 
-    // 2) Fall back to PATH-based lookup, then common install locations.
-    // Each scope name maps to a binary path registered in capabilities/default.json.
-    let scope_names = pm3_scope_names();
-    let mut first_spawn_error: Option<AppError> = None;
-
-    for scope_name in &scope_names {
-        let args = pm3_args(port, cmd);
-        let output_future = app.shell().command(scope_name).args(&args).output();
-
-        // Note: When the timeout fires and the future is dropped, Tauri's shell plugin
-        // handles cleanup of the child process. The `tokio::time::timeout` wrapper
-        // ensures we don't wait forever, and the Tauri runtime drops the child on cancel.
-        let output = match timeout(PM3_COMMAND_TIMEOUT, output_future).await {
-            Err(_) => {
-                return Err(AppError::Timeout(format!(
-                    "PM3 command timed out after {}s: {}",
-                    PM3_COMMAND_TIMEOUT.as_secs(),
-                    cmd
-                )));
-            }
-            Ok(Err(e)) => {
-                // Spawn failed -- binary not found at this path. Record the error
-                // from the first attempt (PATH lookup) and try the next location.
-                if first_spawn_error.is_none() {
-                    first_spawn_error = Some(AppError::CommandFailed(format!(
-                        "Failed to spawn proxmark3: {}",
-                        e
-                    )));
-                }
-                continue;
-            }
-            Ok(Ok(output)) => output,
-        };
-
-        // Binary was found and executed -- process the result immediately.
-        // No further fallback attempts needed regardless of exit code.
-        let code = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        log::debug!(
-            "PM3 subprocess exited: code={}, stdout_bytes={}, stderr_bytes={}",
-            code,
-            output.stdout.len(),
-            output.stderr.len()
-        );
-
-        return match code {
-            0 => {
-                let cleaned = strip_ansi(&stdout);
-                Ok(cleaned)
-            }
-            -5 | 251 => Err(AppError::Timeout(format!("PM3 timed out running: {}", cmd))),
-            _ => {
-                let detail = process_error_detail(&stdout, &stderr);
+    match code {
+        0 => Ok(strip_ansi(&stdout)),
+        -5 | 251 => Err(AppError::Timeout(format!("PM3 timed out running: {cmd}"))),
+        _ => {
+            let detail = process_error_detail(&stdout, &stderr);
+            let lower = detail.to_ascii_lowercase();
+            if lower.contains("permission denied") || lower.contains("access denied") {
+                Err(AppError::SerialPermissionDenied(port.into()))
+            } else {
                 Err(AppError::CommandFailed(format!(
-                    "Exit code {}: {}",
-                    code, detail
+                    "Exit code {code}: {detail}"
                 )))
             }
-        };
+        }
     }
-
-    // All scope names exhausted -- return the first spawn error (from PATH lookup)
-    // so the error message is the most user-recognizable one.
-    Err(first_spawn_error.unwrap_or_else(|| {
-        AppError::CommandFailed("Failed to spawn proxmark3: binary not found".into())
-    }))
 }
 
 /// Run a single PM3 command: spawns `proxmark3 -p {port} -f -c "{cmd}"`,
@@ -245,17 +196,7 @@ async fn execute_pm3(app: &AppHandle, port: &str, cmd: &str) -> Result<String, A
 /// Emits the command being run and its output to the frontend terminal panel.
 ///
 /// **Known limitation -- subprocess cancellation on reset:**
-/// This function uses `tauri_plugin_shell`'s `.output()` which internally spawns a child
-/// process and collects stdout/stderr until exit. Because the child handle is owned by the
-/// shell plugin's future and not exposed to callers, we cannot kill the subprocess from
-/// outside (e.g., when the user presses Reset during a write operation). Refactoring to
-/// `spawn()` + async stream reading would be needed for true cancellation support.
-///
-/// In practice this is acceptable because:
-/// - T5577/EM4305 LF writes complete in under 2 seconds.
-/// - The 30-second timeout (`PM3_COMMAND_TIMEOUT`) already protects against hangs.
-/// - When the Tauri future is dropped (timeout or app shutdown), the shell plugin
-///   cleans up the child process.
+/// The process is killed if the timeout future is dropped.
 pub async fn run_command(app: &AppHandle, port: &str, cmd: &str) -> Result<String, AppError> {
     emit_output(app, &format!("pm3 --> {}", cmd), false);
     match execute_pm3(app, port, cmd).await {
@@ -277,8 +218,8 @@ pub async fn run_command(app: &AppHandle, port: &str, cmd: &str) -> Result<Strin
 /// Managed state for long-running HF operations (autopwn, dump, write).
 /// Stored via `app.manage()` in `lib.rs`.
 pub struct HfOperationState {
-    /// Running child process — `take()` to kill via `CommandChild::kill(self)`.
-    pub child: Mutex<Option<CommandChild>>,
+    /// Cancellation signal owned by the running Rust-side child task.
+    pub cancel: Mutex<Option<oneshot::Sender<()>>>,
     /// Dump file path set by autopwn after completion (e.g. "hf-mf-01020304-dump.bin").
     pub dump_path: Mutex<Option<String>>,
 }
@@ -286,7 +227,7 @@ pub struct HfOperationState {
 impl HfOperationState {
     pub fn new() -> Self {
         Self {
-            child: Mutex::new(None),
+            cancel: Mutex::new(None),
             dump_path: Mutex::new(None),
         }
     }
@@ -317,28 +258,20 @@ pub async fn run_command_streaming<F>(
 where
     F: FnMut(&str),
 {
-    // Validate port
-    validate_port(port)?;
-
-    // Reject command separators
-    if cmd.contains(';') || cmd.contains('\n') || cmd.contains('\r') {
-        return Err(AppError::CommandFailed(
-            "Invalid characters in command".into(),
-        ));
-    }
+    validate_command_input(port, cmd)?;
 
     emit_output(app, &format!("pm3 --> {}", cmd), false);
 
-    // Try sidecar first, then scope names — same strategy as execute_pm3()
-    let (rx, child) = spawn_pm3(app, port, cmd)?;
+    // Use the same validated, absolute executable as non-streaming commands.
+    let (rx, cancel) = spawn_pm3(app, port, cmd).await?;
 
     // Store child for cancellation
     {
         let mut lock = hf_state
-            .child
+            .cancel
             .lock()
             .map_err(|e| AppError::CommandFailed(format!("HF state lock poisoned: {}", e)))?;
-        *lock = Some(child);
+        *lock = Some(cancel);
     }
 
     // Read lines with timeout
@@ -346,7 +279,7 @@ where
 
     // Clear child on completion (process already exited or was killed)
     {
-        let mut lock = hf_state.child.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lock = hf_state.cancel.lock().unwrap_or_else(|e| e.into_inner());
         *lock = None;
     }
 
@@ -359,47 +292,96 @@ where
     }
 }
 
-/// Spawn PM3 via sidecar or scope names, returning the event receiver + child.
-fn spawn_pm3(
+/// Spawn PM3 directly with argv, returning streamed events and cancellation.
+#[derive(Debug)]
+enum Pm3ProcessEvent {
+    Stdout(String),
+    Stderr(String),
+    Error(String),
+    Terminated(Option<i32>),
+}
+
+async fn spawn_pm3(
     app: &AppHandle,
     port: &str,
     cmd: &str,
-) -> Result<(tauri::async_runtime::Receiver<CommandEvent>, CommandChild), AppError> {
+) -> Result<(mpsc::Receiver<Pm3ProcessEvent>, oneshot::Sender<()>), AppError> {
+    let resolved = client::resolve_client(app).await?;
     let args = pm3_args(port, cmd);
+    let mut child = Command::new(&resolved.path)
+        .args(&args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            AppError::CommandFailed(format!("Failed to start configured Proxmark3 client: {e}"))
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::CommandFailed("Cannot capture PM3 stdout".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::CommandFailed("Cannot capture PM3 stderr".into()))?;
+    let (event_tx, event_rx) = mpsc::channel(128);
+    let (cancel_tx, mut cancel_rx) = oneshot::channel();
 
-    // Try sidecar first
-    if let Ok(sidecar_cmd) = app.shell().sidecar("binaries/proxmark3") {
-        if let Ok(result) = sidecar_cmd.args(&args).spawn() {
-            return Ok(result);
-        }
-    }
-
-    // Fall back to scope names
-    let scope_names = pm3_scope_names();
-    let mut first_err: Option<String> = None;
-
-    for scope_name in &scope_names {
-        match app.shell().command(scope_name).args(&args).spawn() {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                if first_err.is_none() {
-                    first_err = Some(format!("{}", e));
+    let stdout_tx = event_tx.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let _ = stdout_tx.send(Pm3ProcessEvent::Stdout(line)).await;
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = stdout_tx.send(Pm3ProcessEvent::Error(e.to_string())).await;
+                    break;
                 }
             }
         }
-    }
-
-    Err(AppError::CommandFailed(format!(
-        "Failed to spawn proxmark3: {}",
-        first_err.unwrap_or_else(|| "binary not found".into())
-    )))
+    });
+    let stderr_tx = event_tx.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let _ = stderr_tx.send(Pm3ProcessEvent::Stderr(line)).await;
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = stderr_tx.send(Pm3ProcessEvent::Error(e.to_string())).await;
+                    break;
+                }
+            }
+        }
+    });
+    tokio::spawn(async move {
+        let status = tokio::select! {
+            _ = &mut cancel_rx => {
+                let _ = child.kill().await;
+                child.wait().await.ok().and_then(|status| status.code())
+            }
+            status = child.wait() => status.ok().and_then(|status| status.code()),
+        };
+        // Deliver all buffered output before the termination event so parsers
+        // never lose a short process's final status/result line.
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+        let _ = event_tx.send(Pm3ProcessEvent::Terminated(status)).await;
+    });
+    Ok((event_rx, cancel_tx))
 }
 
 /// Read from a `CommandEvent` receiver, accumulating output and emitting lines.
 /// Returns the full cleaned output when the process terminates.
 async fn read_stream_with_timeout<F>(
     app: &AppHandle,
-    mut rx: tauri::async_runtime::Receiver<CommandEvent>,
+    mut rx: mpsc::Receiver<Pm3ProcessEvent>,
     timeout_secs: u64,
     on_line: &mut F,
 ) -> Result<String, AppError>
@@ -424,8 +406,7 @@ where
                 break;
             }
             Ok(Some(event)) => match event {
-                CommandEvent::Stdout(bytes) => {
-                    let line = String::from_utf8_lossy(&bytes);
+                Pm3ProcessEvent::Stdout(line) => {
                     let cleaned = strip_ansi(&line);
                     let trimmed = cleaned.trim();
                     if !trimmed.is_empty() {
@@ -435,8 +416,7 @@ where
                         accumulated.push('\n');
                     }
                 }
-                CommandEvent::Stderr(bytes) => {
-                    let line = String::from_utf8_lossy(&bytes);
+                Pm3ProcessEvent::Stderr(line) => {
                     let cleaned = strip_ansi(&line);
                     let trimmed = cleaned.trim();
                     if !trimmed.is_empty() {
@@ -446,15 +426,14 @@ where
                         accumulated.push('\n');
                     }
                 }
-                CommandEvent::Error(msg) => {
+                Pm3ProcessEvent::Error(msg) => {
                     emit_output(app, &msg, true);
                     return Err(AppError::CommandFailed(format!("Process error: {}", msg)));
                 }
-                CommandEvent::Terminated(payload) => {
-                    exit_code = payload.code;
+                Pm3ProcessEvent::Terminated(code) => {
+                    exit_code = code;
                     break;
                 }
-                _ => {} // Future CommandEvent variants — ignore
             },
         }
     }
@@ -476,6 +455,10 @@ where
 /// Uses friendly, hacker-casual terminal output. All probe messages are green
 /// (non-error) except the final "not found" message.
 pub async fn detect_device(app: &AppHandle) -> Result<(String, String, String), AppError> {
+    // Resolve client independently of reader enumeration. Otherwise a machine
+    // with neither a client nor a connected reader would misleadingly report
+    // only the missing reader.
+    client::resolve_client(app).await?;
     let candidates = build_port_candidates();
 
     // Pick a random init message for personality
@@ -613,69 +596,9 @@ fn build_port_candidates() -> Vec<String> {
     ports
 }
 
-/// Attempt to run a PM3 command via the bundled sidecar binary (silent -- no emit).
-/// Returns Ok(stdout) on success, Err on any failure (sidecar not found, spawn
-/// error, non-zero exit code). Callers should fall through to PATH-based lookup
-/// on failure.
-///
-/// The sidecar binary depends on DLLs (Qt5, ICU, etc.) bundled in the same
-/// directory via `bundle.resources`. The Windows DLL loader finds them
-/// automatically since they share the sidecar's directory.
-async fn try_sidecar_silent(app: &AppHandle, port: &str, cmd: &str) -> Result<String, AppError> {
-    let sidecar = app
-        .shell()
-        .sidecar("binaries/proxmark3")
-        .map_err(|e| AppError::CommandFailed(format!("Sidecar not available: {}", e)))?;
-
-    let args = pm3_args(port, cmd);
-    let output_future = sidecar.args(&args).output();
-
-    let output = match timeout(PM3_COMMAND_TIMEOUT, output_future).await {
-        Err(_) => {
-            return Err(AppError::Timeout(format!(
-                "PM3 command timed out after {}s: {}",
-                PM3_COMMAND_TIMEOUT.as_secs(),
-                cmd
-            )));
-        }
-        Ok(Err(e)) => {
-            return Err(AppError::CommandFailed(format!(
-                "Failed to run sidecar: {}",
-                e
-            )));
-        }
-        Ok(Ok(output)) => output,
-    };
-
-    let code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    log::debug!(
-        "PM3 sidecar exited: code={}, stdout_bytes={}, stderr_bytes={}",
-        code,
-        output.stdout.len(),
-        output.stderr.len()
-    );
-
-    match code {
-        0 => {
-            let cleaned = strip_ansi(&stdout);
-            Ok(cleaned)
-        }
-        -5 | 251 => Err(AppError::Timeout(format!("PM3 timed out running: {}", cmd))),
-        _ => {
-            let detail = process_error_detail(&stdout, &stderr);
-            Err(AppError::CommandFailed(format!(
-                "Exit code {}: {}",
-                code, detail
-            )))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{process_error_detail, validate_port};
+    use super::{pm3_args, process_error_detail, validate_command_input, validate_port};
 
     #[test]
     fn stable_linux_by_id_port_is_valid() {
@@ -704,6 +627,15 @@ mod tests {
         assert_eq!(process_error_detail("", ""), "no process output");
         assert_eq!(process_error_detail("result\n", ""), "result");
         assert_eq!(process_error_detail("", "failure\n"), "failure");
+    }
+
+    #[test]
+    fn pm3_command_is_one_argv_value_and_never_shell_interpolated() {
+        let args = pm3_args("/dev/ttyACM0", "hw version");
+        assert_eq!(args.last().map(String::as_str), Some("hw version"));
+        assert!(validate_command_input("/dev/ttyACM0", "hw version").is_ok());
+        assert!(validate_command_input("/dev/ttyACM0", "hw version;lf t55xx wipe").is_err());
+        assert!(validate_command_input("/dev/ttyACM0", "hw version\nquit").is_err());
     }
 }
 

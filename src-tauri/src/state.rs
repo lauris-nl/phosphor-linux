@@ -516,3 +516,27 @@ impl WizardMachine {
         Ok(&self.current)
     }
 }
+
+#[cfg(test)]
+mod connection_error_tests {
+    use super::*;
+
+    #[test]
+    fn client_configuration_error_does_not_clear_known_reader() {
+        let mut machine = WizardMachine::new();
+        machine.transition(WizardAction::StartDetection).unwrap();
+        machine.transition(WizardAction::DeviceFound {
+            port: "/dev/ttyACM0".into(),
+            model: "Proxmark3".into(),
+            firmware: "v4.test".into(),
+        }).unwrap();
+        machine.transition(WizardAction::ReportError {
+            message: "Proxmark3 client configuration required".into(),
+            user_message: "Proxmark3 client required".into(),
+            recoverable: true,
+            recovery_action: Some(RecoveryAction::Manual),
+        }).unwrap();
+        assert_eq!(machine.port.as_deref(), Some("/dev/ttyACM0"));
+        assert!(matches!(machine.current, WizardState::Error { .. }));
+    }
+}

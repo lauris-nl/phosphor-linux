@@ -32,15 +32,25 @@ pub async fn detect_device(
         }
         Err(e) => {
             let err_msg = e.to_string();
-            let user_message = if err_msg.contains("spawn")
-                || err_msg.contains("not found")
-                || err_msg.contains("No such file")
-                || err_msg.contains("program not found")
-            {
-                "Proxmark3 binary not found. Ensure proxmark3 is installed and in your PATH."
-                    .to_string()
-            } else {
-                "No Proxmark3 device found. Check your USB connection.".to_string()
+            let (user_message, recovery_action) = match &e {
+                AppError::ClientRequired => (
+                    "Proxmark3 client required. Locate a current RRG/Iceman client to continue."
+                        .to_string(),
+                    Some(crate::cards::types::RecoveryAction::Manual),
+                ),
+                AppError::ClientInvalid(_) => (
+                    "Selected file is not a compatible Proxmark3 client.".to_string(),
+                    Some(crate::cards::types::RecoveryAction::Manual),
+                ),
+                AppError::SerialPermissionDenied(_) => (
+                    "Permission denied opening the Proxmark3 serial port. Check your udev rules or dialout/uucp group."
+                        .to_string(),
+                    Some(crate::cards::types::RecoveryAction::Manual),
+                ),
+                _ => (
+                    "No Proxmark3 reader found. Check the USB connection.".to_string(),
+                    Some(crate::cards::types::RecoveryAction::Retry),
+                ),
             };
             let mut m = machine.lock().map_err(|e| {
                 AppError::CommandFailed(format!("State lock poisoned: {}", e))
@@ -49,7 +59,7 @@ pub async fn detect_device(
                 message: err_msg,
                 user_message,
                 recoverable: true,
-                recovery_action: Some(crate::cards::types::RecoveryAction::Retry),
+                recovery_action,
             })?;
             Ok(m.current.clone())
         }

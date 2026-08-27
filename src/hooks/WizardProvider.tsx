@@ -64,6 +64,10 @@ export interface UseWizardReturn {
   isLoading: boolean;
   /** Start device detection */
   detect: () => void;
+  /** Choose, validate and persist a current RRG/Iceman client, then retry detection. */
+  locatePm3Client: () => Promise<void>;
+  /** Retry reader discovery after resetting only the wizard flow. */
+  retryDetection: () => Promise<void>;
   /** Start card scanning */
   scan: () => void;
   /** Proceed to blank card stage with specified blank type */
@@ -192,6 +196,18 @@ export function WizardProvider({ children }: { children: ReactNode }) {
     if (isLoading) return;
     send({ type: 'DETECT' });
   }, [send, isLoading]);
+  const locatePm3Client = useCallback(async () => {
+    const selected = await api.locatePm3Client();
+    if (!selected) return;
+    await api.resetWizard();
+    send({ type: 'RESET' });
+    send({ type: 'DETECT' });
+  }, [send]);
+  const retryDetection = useCallback(async () => {
+    await api.resetWizard();
+    send({ type: 'RESET' });
+    send({ type: 'DETECT' });
+  }, [send]);
   const scan = useCallback(() => {
     if (isLoading) return;
     send({ type: 'SCAN' });
@@ -417,6 +433,8 @@ export function WizardProvider({ children }: { children: ReactNode }) {
       isStep,
       isLoading,
       detect,
+      locatePm3Client,
+      retryDetection,
       scan,
       skipToBlank,
       write,
@@ -461,7 +479,7 @@ export function WizardProvider({ children }: { children: ReactNode }) {
       // HF processing
       ctx.hfPhase, ctx.hfKeysFound, ctx.hfKeysTotal, ctx.hfElapsed, ctx.hfDumpInfo,
       // Callbacks
-      detect, scan, skipToBlank, write, finish, reset,
+      detect, locatePm3Client, retryDetection, scan, skipToBlank, write, finish, reset,
       updateFirmware, skipFirmware, cancelFirmware, selectVariant,
       backToScan, softReset, disconnect, loadSavedCard, reDetectBlank,
       startHfProcess, cancelHf, send,

@@ -227,9 +227,12 @@ export function WizardContainer() {
             recoverable={wizard.context.errorRecoverable}
             recoveryAction={wizard.context.errorRecoveryAction}
             errorSource={wizard.context.errorSource}
-            onRetry={wizard.context.errorRecoveryAction === 'Reconnect'
-              ? wizard.reset
-              : wizard.softReset}
+            onLocateClient={wizard.locatePm3Client}
+            onRetry={wizard.context.errorUserMessage?.includes('Proxmark3 client')
+              ? wizard.retryDetection
+              : wizard.context.errorRecoveryAction === 'Reconnect'
+                ? wizard.reset
+                : wizard.softReset}
             onReset={wizard.reset}
           />
         );

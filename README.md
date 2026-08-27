@@ -1,5 +1,7 @@
 # Phosphor Linux
 
+[![Linux CI](https://github.com/lauris-nl/phosphor-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/lauris-nl/phosphor-linux/actions/workflows/ci.yml)
+
 Native Linux support for the [Phosphor](https://github.com/nikitaart2000/phosphor)
 Proxmark3 GUI.
 

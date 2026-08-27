@@ -113,13 +113,56 @@ Neither package format includes the Proxmark3 client.
 
 ### RRG client and reader access
 
-The RRG/Iceman `proxmark3` executable is a separate runtime dependency. Confirm
-that it matches the reader firmware and works independently:
+The RRG/Iceman `proxmark3` executable is a separate runtime dependency. Obtain
+it from the official RFID Research Group repository:
+
+<https://github.com/RfidResearchGroup/proxmark3>
+
+Do not download an unrelated `proxmark3` executable from a file-sharing site,
+and do not select a legacy pre-RRG client. Phosphor Linux does not distribute a
+PM3 client binary. The client version should match the RRG firmware generation
+installed on the reader.
+
+The official project maintains the current
+[Linux dependency and device-access instructions](https://github.com/RfidResearchGroup/proxmark3/blob/master/doc/md/Installation_Instructions/Linux-Installation-Instructions.md).
+After installing the dependencies listed there, build the host client directly
+from the official source:
+
+```bash
+git clone https://github.com/RfidResearchGroup/proxmark3.git
+cd proxmark3
+make clean
+make -j"$(nproc)" client
+./client/proxmark3 --version
+```
+
+`make client` builds the host application only; it does not flash or modify the
+reader firmware. Keep the cloned directory, then choose its executable in
+Phosphor:
+
+```text
+/path/to/proxmark3/client/proxmark3
+```
+
+Use **LOCATE PROXMARK3** in Phosphor, select that file, and press **RETRY**. The
+selected absolute path is remembered for future AppImage starts. Alternatively,
+follow the RRG project's
+[installation instructions](https://github.com/RfidResearchGroup/proxmark3/blob/master/doc/md/Use_of_Proxmark/0_Compilation-Instructions.md#install)
+to install the client and its resources under `/usr/local`; Phosphor will then
+normally find `/usr/local/bin/proxmark3` automatically.
+
+Confirm the resulting client works independently and can communicate with the
+reader:
 
 ```bash
 proxmark3 --version
 proxmark3 -p /dev/serial/by-id/your-proxmark-device -f -c "hw version"
 ```
+
+If you did not install it system-wide, substitute
+`./client/proxmark3` for `proxmark3` in those commands. Building or selecting a
+client is separate from firmware migration: do not run flashing commands merely
+to install Phosphor.
 
 If serial access is denied, add the user to the distribution's serial-device
 group (`uucp` on Arch/Manjaro or commonly `dialout` on Debian/Ubuntu), then log

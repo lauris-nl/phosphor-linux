@@ -19,6 +19,11 @@ export function MainLayout() {
   // B1: Derive PM3 connection status from wizard step
   const connected = wizard.context.port !== null
     && !(wizard.currentStep === 'Error' && wizard.context.errorRecoveryAction === 'Reconnect');
+  const clientRequired = wizard.currentStep === 'Error'
+    && (wizard.context.errorUserMessage?.includes('Proxmark3 client') ?? false);
+  const connectionState = clientRequired ? 'client-required' as const
+    : connected ? 'connected' as const
+      : 'disconnected' as const;
 
   // B8: Derive system status from wizard state
   const status: SystemStatus = wizard.isLoading ? 'busy'
@@ -84,7 +89,7 @@ export function MainLayout() {
     >
       {/* TopBar spans full width */}
       <div style={{ gridColumn: '1 / -1' }}>
-        <TopBar connected={connected} onDisconnect={wizard.disconnect} />
+        <TopBar connectionState={connectionState} onDisconnect={wizard.disconnect} />
       </div>
 
       {/* Sidebar */}

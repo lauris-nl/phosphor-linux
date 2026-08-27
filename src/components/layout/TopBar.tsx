@@ -1,12 +1,18 @@
 import { useSfx } from '../../hooks/useSfx';
 
 interface TopBarProps {
-  connected: boolean;
+  connectionState: 'connected' | 'disconnected' | 'client-required';
   onDisconnect?: () => void;
 }
 
-export function TopBar({ connected, onDisconnect }: TopBarProps) {
+export function TopBar({ connectionState, onDisconnect }: TopBarProps) {
   const sfx = useSfx();
+  const connected = connectionState === 'connected';
+  const connectionLabel = connected
+    ? '[PM3:CONNECTED]'
+    : connectionState === 'client-required'
+      ? '[PM3:CLIENT REQUIRED]'
+      : '[PM3:DISCONNECTED]';
 
   return (
     <div
@@ -25,16 +31,18 @@ export function TopBar({ connected, onDisconnect }: TopBarProps) {
       }}
     >
       <div style={{ color: 'var(--green-mid)', fontWeight: 600 }}>
-        PHOSPHOR v0.2.0
+        PHOSPHOR v0.2.1
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
         <div
           style={{
-            color: connected ? 'var(--green-bright)' : 'var(--red-bright)',
+            color: connected ? 'var(--green-bright)'
+              : connectionState === 'client-required' ? 'var(--amber)'
+                : 'var(--red-bright)',
             fontWeight: 500,
           }}
         >
-          {connected ? '[PM3:CONNECTED]' : '[PM3:DISCONNECTED]'}
+          {connectionLabel}
         </div>
         {connected && onDisconnect && (
           <div

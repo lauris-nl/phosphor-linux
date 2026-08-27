@@ -150,9 +150,22 @@ npm run tauri build -- --bundles deb
 ```
 
 Minimal Debian/Ubuntu packaging environments also need `patchelf` and
-`xdg-utils` for the AppImage bundler. Install `libfuse2` to mount the resulting
-AppImage through FUSE, or launch it with `APPIMAGE_EXTRACT_AND_RUN=1` on hosts
-where FUSE mounting is unavailable.
+`xdg-utils` for the AppImage bundler, plus `squashfs-tools` for the finalization
+step:
+
+```bash
+./scripts/finalize-appimage \
+  src-tauri/target/release/bundle/appimage/Phosphor_VERSION_amd64.AppImage
+```
+
+The finalizer makes the AppImage prefer the host's WebKitGTK 4.1 runtime. This
+avoids mixing a bundled WebKit build with a different host EGL/graphics stack;
+the bundled runtime remains a fallback when WebKitGTK 4.1 is unavailable. On
+Ubuntu/Debian install `libwebkit2gtk-4.1-0`; on Arch/Manjaro install
+`webkit2gtk-4.1`.
+
+Install `libfuse2` to mount the resulting AppImage through FUSE, or launch it
+with `APPIMAGE_EXTRACT_AND_RUN=1` on hosts where FUSE mounting is unavailable.
 
 Generated packages are placed under `src-tauri/target/release/bundle/` and are
 ignored by Git. AppImages should be built on the oldest supported Linux base;

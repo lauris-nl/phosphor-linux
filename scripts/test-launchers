@@ -4,10 +4,12 @@ set -euo pipefail
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 launcher="$repo_dir/scripts/phosphor"
 dev_launcher="$repo_dir/scripts/phosphor-dev"
+appimage_apprun="$repo_dir/scripts/appimage/AppRun"
+appimage_finalizer="$repo_dir/scripts/finalize-appimage"
 test_dir="$(mktemp -d)"
 trap 'rm -r -- "$test_dir"' EXIT
 
-bash -n "$launcher" "$dev_launcher"
+bash -n "$launcher" "$dev_launcher" "$appimage_apprun" "$appimage_finalizer"
 
 if env -u PHOSPHOR_MODERN_PM3_BIN -u PHOSPHOR_PM3_PORT \
     PATH=/usr/bin:/bin "$launcher" >"$test_dir/no-client.out" 2>&1; then
@@ -36,7 +38,7 @@ if ! grep -q "Proxmark3 serial device is not present" "$test_dir/no-reader.out";
 fi
 
 if grep -R -n -E '/home/[^/]+/|vendor/proxmark3(-legacy)?' \
-    "$launcher" "$dev_launcher"; then
+    "$launcher" "$dev_launcher" "$appimage_apprun" "$appimage_finalizer"; then
     echo "launcher contains a developer-machine path" >&2
     exit 1
 fi

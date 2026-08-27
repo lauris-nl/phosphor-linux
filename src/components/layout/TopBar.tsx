@@ -25,7 +25,7 @@ export function TopBar({ connected, onDisconnect }: TopBarProps) {
       }}
     >
       <div style={{ color: 'var(--green-mid)', fontWeight: 600 }}>
-        PHOSPHOR v1.1.0
+        PHOSPHOR v0.2.0
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
         <div

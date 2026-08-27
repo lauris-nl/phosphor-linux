@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# != 1 )); then
+    echo "Usage: $0 path/to/Phosphor_VERSION_amd64.AppImage" >&2
+    exit 2
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+custom_apprun="$script_dir/appimage/AppRun"
+image="$(realpath -- "$1")"
+
+if [[ ! -f "$image" || ! -x "$image" ]]; then
+    echo "AppImage is missing or not executable: $image" >&2
+    exit 1
+fi
+
+for command_name in dd mksquashfs unsquashfs; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        echo "Required packaging command is missing: $command_name" >&2
+        exit 1
+    fi
+done
+
+offset="$($image --appimage-offset)"
+if [[ ! "$offset" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Could not determine a valid AppImage filesystem offset." >&2
+    exit 1
+fi
+
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/phosphor-appimage.XXXXXX")"
+cleanup() {
+    rm -rf -- "$work_dir"
+}
+trap cleanup EXIT
+
+app_dir="$work_dir/AppDir"
+runtime="$work_dir/runtime"
+squashfs="$work_dir/filesystem.squashfs"
+replacement="$work_dir/$(basename -- "$image")"
+
+unsquashfs -quiet -d "$app_dir" -o "$offset" "$image"
+install -m 0755 "$custom_apprun" "$app_dir/AppRun"
+dd if="$image" of="$runtime" bs=1 count="$offset" status=none
+mksquashfs "$app_dir" "$squashfs" -noappend -all-root -comp gzip -quiet
+cp -- "$runtime" "$replacement"
+cat "$squashfs" >>"$replacement"
+chmod 0755 "$replacement"
+
+replacement_offset="$($replacement --appimage-offset)"
+if [[ "$replacement_offset" != "$offset" ]]; then
+    echo "Finalized AppImage has an unexpected filesystem offset." >&2
+    exit 1
+fi
+
+mv -- "$replacement" "$image"
+echo "Finalized AppImage: $image"

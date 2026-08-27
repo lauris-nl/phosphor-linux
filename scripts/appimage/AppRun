@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+
+find_host_webkit() {
+    local ldconfig_bin=""
+    local candidate
+
+    for candidate in "$(command -v ldconfig 2>/dev/null || true)" /sbin/ldconfig /usr/sbin/ldconfig; do
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            ldconfig_bin="$candidate"
+            break
+        fi
+    done
+
+    if [[ -n "$ldconfig_bin" ]]; then
+        "$ldconfig_bin" -p 2>/dev/null |
+            awk '$1 == "libwebkit2gtk-4.1.so.0" && !found { print $NF; found = 1 }'
+        return
+    fi
+
+    for candidate in \
+        /usr/lib/libwebkit2gtk-4.1.so.0 \
+        /usr/lib64/libwebkit2gtk-4.1.so.0 \
+        /usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0 \
+        /lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0; do
+        if [[ -r "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+}
+
+host_webkit="$(find_host_webkit)"
+if [[ -n "$host_webkit" && "$host_webkit" == /* && -r "$host_webkit" ]]; then
+    host_lib_dir="$(dirname -- "$host_webkit")"
+    export LD_LIBRARY_PATH="$host_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export GDK_BACKEND="${GDK_BACKEND:-x11}"
+    exec "$app_dir/usr/bin/phosphor" "$@"
+fi
+
+exec "$app_dir/AppRun.wrapped" "$@"

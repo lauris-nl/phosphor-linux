@@ -34,6 +34,43 @@ using an AT91SAM7S512 with 512 KB flash and matching current RRG firmware/client
 That observation does **not** identify every generic or inexpensive clone:
 FPGA, flash, antenna, LED, and board wiring can differ.
 
+## Install the v0.2.1 prerelease
+
+Download the Linux packages and `SHA256SUMS` from the
+[Phosphor Linux v0.2.1 prerelease](https://github.com/lauris-nl/phosphor-linux/releases/tag/v0.2.1).
+Verify the download before running it:
+
+```bash
+sha256sum -c SHA256SUMS
+```
+
+Run the AppImage without installing it:
+
+```bash
+chmod +x Phosphor_0.2.1_amd64.AppImage
+./Phosphor_0.2.1_amd64.AppImage
+```
+
+Or install the Debian/Ubuntu package:
+
+```bash
+sudo apt install ./Phosphor_0.2.1_amd64.deb
+```
+
+The Proxmark3 client is deliberately not bundled. On first start, Phosphor
+searches for a separately installed current RRG/Iceman client. If it cannot
+find one, select **LOCATE PROXMARK3**, choose the actual `proxmark3` executable,
+and then select **RETRY**. The choice is validated, saved per user, and reused
+when the AppImage is opened again by double-clicking it. No development launcher
+or `PHOSPHOR_*` environment variable is required after that.
+
+The v0.2.1 SHA-256 values are:
+
+```text
+8b04d1de8dda004ad3fe4e291f6651c316275e57446763c445218437a55fd6b9  Phosphor_0.2.1_amd64.AppImage
+bfbca98ced87c6e1db1949c3f96ce360ff8ba00a68e4a376a9684d2347553c74  Phosphor_0.2.1_amd64.deb
+```
+
 ## Requirements
 
 - A Linux desktop capable of running WebKitGTK 4.1 applications
@@ -127,6 +164,12 @@ configuration directory (normally
 `$HOME/.config/com.phosphor.app/pm3-client.json` on Linux). Settings shows the
 active path and its discovery source.
 
+Client configuration and reader connectivity are separate states. A missing
+client opens the configuration-required screen; a missing reader, serial
+permission failure, client/firmware mismatch, and physical disconnect each
+produce their own diagnostic. Selecting or validating a client does not mark a
+known USB reader disconnected.
+
 ## Development
 
 Set the stable reader path explicitly for development:
@@ -188,8 +231,10 @@ GPL source/distribution plan. Until then, users install a matching current RRG
 client separately. A double-clicked AppImage can locate it from the connection
 screen; `PHOSPHOR_MODERN_PM3_BIN` remains available as an explicit override.
 
-Linux application packages are published on the GitHub Releases page. PM3
-firmware and the separate RRG client are not included in those packages.
+Linux application packages are published on the
+[GitHub Releases page](https://github.com/lauris-nl/phosphor-linux/releases).
+The current packaged prerelease is v0.2.1. PM3 firmware and the separate RRG
+client are not included in those packages.
 
 `src-tauri/binaries/`, build output, PM3 logs, dumps, and saved-tag data are
 intentionally excluded from Git. This repository does not vendor the RRG source

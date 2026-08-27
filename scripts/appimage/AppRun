@@ -3,6 +3,23 @@ set -euo pipefail
 
 app_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 
+# The packaged app deliberately does not bundle the RRG client. Honour the
+# same explicit override as the repository launchers by making its directory
+# visible to Tauri's allowlisted `proxmark3` command lookup.
+if [[ -n "${PHOSPHOR_MODERN_PM3_BIN:-}" ]]; then
+    if [[ ! -x "$PHOSPHOR_MODERN_PM3_BIN" ]]; then
+        printf 'Configured Proxmark3 client is not executable: %s\n' \
+            "$PHOSPHOR_MODERN_PM3_BIN" >&2
+        exit 1
+    fi
+    if [[ "$(basename -- "$PHOSPHOR_MODERN_PM3_BIN")" != "proxmark3" ]]; then
+        printf 'PHOSPHOR_MODERN_PM3_BIN must point to an executable named proxmark3: %s\n' \
+            "$PHOSPHOR_MODERN_PM3_BIN" >&2
+        exit 1
+    fi
+    export PATH="$(dirname -- "$PHOSPHOR_MODERN_PM3_BIN"):$PATH"
+fi
+
 find_host_webkit() {
     local ldconfig_bin=""
     local candidate
